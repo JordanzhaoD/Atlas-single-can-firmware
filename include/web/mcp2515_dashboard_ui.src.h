@@ -1503,7 +1503,7 @@ textarea.inp { resize: vertical; min-height: 60px; font-family: monospace;
   <div class="setting-row">
     <div>
       <div class="setting-name">启用 JITTER 程序</div>
-      <div class="setting-desc" id="jitter-desc">0x399 事件驱动：AP 啮合（事件3）进入武装期并单发一次 bit46 解锁帧；检测到 FSD 车道捕捉（事件6）立即合成 0x045 取消（提前约 200ms 打断甩动窗），等 AP 可用（事件2）后自动重挂；重挂后以 200ms 节奏持续保持 bit46 解锁直至落地，等待窗 10s（实测车响应 2.8~7.1s）。防甩本体已实车验证：2026-09-15 单车 21 周期取消全部命中、0 次甩方向（双 CAN beta15 同机制同车实测）。失败无重试、无会话封锁——程序静默复位，人工再开一轮。v1.19.3 落地率修正与双 CAN beta16 同源。需先开启「AP 注入门控」；门控关闭时本开关仅记忆状态、机制不运行。</div>
+      <div class="setting-desc" id="jitter-desc">0x399 事件驱动：AP 啮合（事件3）进入武装期并单发一次 bit46 解锁帧；检测到 FSD 车道捕捉（事件6）立即合成 0x045 取消（提前约 200ms 打断甩动窗），等 AP 可用（事件2）后自动重挂；等待窗 10s（实测车响应 2.8~7.1s），窗内基础 bit46 活帧改写连续跟载波保持解锁（对齐 LittleGong 连续注入）。防甩本体已实车验证：2026-09-15 单车 21 周期取消全部命中、0 次甩方向（双 CAN beta15 同机制同车实测）。失败无重试、无会话封锁——程序静默复位，人工再开一轮。v1.19.4 落地率修正（回归修复）与双 CAN beta17 同源。需先开启「AP 注入门控」；门控关闭时本开关仅记忆状态、机制不运行。</div>
     </div>
     <label class="tgl"><input type="checkbox" id="def-jitter-tgl" onchange="saveDefenseConfig()"><div class="tgl-track"></div></label>
   </div>
@@ -1513,7 +1513,7 @@ textarea.inp { resize: vertical; min-height: 60px; font-family: monospace;
     <div class="diag-item"><span class="lbl">AP / 周期数</span><span class="v-dim" id="jitter-ap">-- / 0</span></div>
     <div class="diag-item"><span class="lbl">取消 / 重挂</span><span class="v-dim" id="jitter-bursts">0 / 0</span></div>
     <div class="diag-item"><span class="lbl">FSD落地 / EAP落地</span><span class="v-dim" id="jitter-landing">0 / 0</span></div>
-    <div class="diag-item"><span class="lbl">bit46 / 刷新 / 保持</span><span class="v-dim" id="jitter-frames">0 / 0 / 0</span></div>
+    <div class="diag-item"><span class="lbl">bit46 单发</span><span class="v-dim" id="jitter-frames">0</span></div>
     <div class="diag-item"><span class="lbl">TX 成/败</span><span class="v-dim" id="jitter-tx">0 / 0</span></div>
     <div class="diag-item"><span class="lbl">转向中止/复位</span><span class="v-dim" id="jitter-steer">0 / 0</span></div>
     <div class="diag-item"><span class="lbl">超时/故障复位</span><span class="v-dim" id="jitter-resets">0 / 0</span></div>
@@ -2683,12 +2683,12 @@ function updateDefensePage(d){
   setText('jitter-phase',(jtPhaseMap[jt.phase]||jt.phase||'--')+' / '+(jtReasonMap[jt.reason]||jt.reason||'--'));
   setText('jitter-ap',(jt.apState!=null?jt.apState:'--')+' / '+(jt.cycles||0));
   setText('jitter-bursts',(jt.cancels||0)+' / '+(jt.requests||0));
-  // v1.19.2: landing split — FSD(state6)/EAP(state3) after our 0x42;
-  // bit46 cell shows arming shots / pre-re-request refreshes / v1.19.3
-  // window-hold frames (~window/kHoldGapMs on an unresponsive car, 0 once
-  // it lands).
+  // v1.19.2: landing split — FSD(state6)/EAP(state3) after our 0x42 —
+  // stays. v1.19.4: the bit46 cell is the arming one-shot count only —
+  // refresh/hold clones are retired (in-window continuity is the base-path
+  // live-frame rewrite, not a machine counter).
   setText('jitter-landing',(jt.reengagedFsd||0)+' / '+(jt.reengagedEap||0));
-  setText('jitter-frames',(jt.bit46Shots||0)+' / '+(jt.bit46Refreshes||0)+' / '+(jt.bit46Holds||0));
+  setText('jitter-frames',''+(jt.bit46Shots||0));
   setText('jitter-tx',(jt.txOk||0)+' / '+(jt.txFail||0));
   setText('jitter-steer',(jt.steerAborts||0)+' / '+(jt.steerResets||0));
   setText('jitter-resets',(jt.timeoutResets||0)+' / '+(jt.apErrorResets||0));

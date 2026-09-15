@@ -170,7 +170,8 @@ class SimState:
 
         Static standby shape: switch as persisted, procedure inert (gate
         closed in the simulator default). Field set matches
-        appendJitterDiagJson in mcp2515_dashboard.h.
+        appendJitterDiagJson in mcp2515_dashboard.h (v1.19.4: 21 keys —
+        the refresh/hold counters died with their clones).
         """
         return {
             "requested": self.jitter,
@@ -186,8 +187,6 @@ class SimState:
             "reengagedFsd": 0,
             "reengagedEap": 0,
             "bit46Shots": 0,
-            "bit46Refreshes": 0,
-            "bit46Holds": 0,
             "pumpFrames": 0,
             "txOk": 0,
             "txFail": 0,

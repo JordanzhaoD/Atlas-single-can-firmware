@@ -6,6 +6,72 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.19.4] - 2026-09-16
+
+### 实车回归定案（同源双 CAN beta16 两段 120s CSV + 状态图，2026-09-16）
+
+**症状（Jordan 实车，双 CAN beta16 = 本固件 v1.19.3 的逐字同源机）**：基本无法激活
+落地 FSD，打开推杆开启 AP 就报错、退出。
+
+| 指标 | beta16（=v1.19.3） | beta15（=v1.19.2） |
+|---|---|---|
+| 击落（可用性下降）次数/120s | **53-58** | 9-11 |
+| 击落落在克隆帧后 <250ms | 85-88% | — |
+| 2↔1 可用性震荡 | 5×/120s（与 200ms hold 节奏同步） | — |
+| 窗内人工推杆 EAP 落地 | **0/21** | 17/21 |
+| 防甩取消命中 | 21/21 无恙 | 21/21 |
+| TX 帧账目 | 1613 全平（T 帧双记折半后） | — |
+
+**根因链（数据定案）**：
+
+1. v1.19 自创「procedure 期间暂停基础路径活帧改写」（`jitterInhibit3ee` + gate 内
+   `procedureActive()` 早退，注释谎称是 LittleGong 的 `jitter_state != 0` 互斥）→
+   Arming/Disengaging 期间 0x3EE 总线上我方只剩裸克隆帧；
+2. v1.19.2 refresh + v1.19.3 hold 把克隆剂量 2帧/周期 → ~44帧/周期（200ms 节奏 ×
+   10s 窗）；
+3. 克隆帧形态自相矛盾（`00 00 00 D0 20 43 02 80`：byte5|=0x43 置偏移使能位却不写
+   偏移字段、byte3 洗用户偏移 EC→D0、byte6/7 照抄原生模板、200ms 自由节奏脱离
+   载波）——车端逐帧降可用性。对照组基础路径活帧改写 `00 00 00 EC 20 43 04 9E`
+   （byte3/5/6/7 联动自洽、跟载波）车全天接受、零击落聚集。
+
+**LittleGong 对齐裁决**（本轮对 ColorBlack_T-1.3.8 固件 strings 复核）：JITTER 状态机
+日志（`Active Procedure: ARMING / DISENGAGING / Rengaged`、`[JITTER] FSD 0x3EE
+bit46=1 sent`、`no cached 0x3EE/0x045`）与基础写入器 `g_can_send_frame_0x3EE`
+**并存**，全固件无任何「暂停/互斥」语义日志串——对方核心 bit46 注入连续运行，
+JITTER 机器与之共存；其机器在取消→重挂间什么都不做，唯一克隆发射 = arming 单发。
+v1.19 注释的互斥说法是我们自创的误植。
+
+### Fixed（三删两留，与双 CAN 4.5.0-beta17 逐字同源；取消泵常量/时序零改动）
+
+- **删 hold**（v1.19.3 回归放大器）：`kHoldGapMs`/`holdActive_`/`lastHoldTxMs_`/
+  tick() hold 块/`bit46Holds` 计数+JSON 键+UI 格；
+- **删 refresh**（v1.19.2 自创、LittleGong 无此行为；克隆恰在 0x42 重挂前毒化
+  可用性）：pending 队列/`bit46Refreshes` 计数+JSON 键+UI 格；
+- **删基础路径暂停 + Disengaging 窗豁免**（v1.19 自创）：gate 内 `procedureActive()`
+  早退块原位换成 `inDisengagingWait()` 豁免（仍居 canActive/OTA/handler 三道
+  fail-closed 之后、gate-off 早真之前——窗内车在 0x399 state 1/2 会被 plain AP 门
+  否决，豁免恢复 beta13 资格窗机制；Arming 车已啮合 state 3..6 无需豁免）；删
+  `jitterInhibit3ee`（mux0/mux1 两处安装）；保留 `jitterObserve3ee`（arming 单发
+  模板缓存）。一个豁免覆盖 checkAD 两道门。效果：窗口内基础 bit46 活帧改写全程
+  连续（跟载波、字段自洽）；
+- **保留**：arming 单发（LittleGong 解码行为，1帧/周期）、10s Disengaging 窗
+  （`kDisengWaitMs`=10000）、sessionCap 删除、取消泵全部冻结件（47ms/3ms/16帧/CRC）；
+- 诊断面 jitter 对象 23→21 键（−bit46Refreshes −bit46Holds）；UI「bit46 / 刷新 /
+  保持」三数格 →「bit46 单发」（id jitter-frames 保留）；webui_simulator.py 镜像同步；
+- `env:native_jitter` 45→41 例（删 hold×3 + refresh×3，改写窗内零克隆灭绝回归，
+  新增 `inDisengagingWait()` 访问器钉）；pytest 契约同步（gate 函数体双钉：
+  `procedureActive` 灭绝 + `inDisengagingWait` 正向豁免序钉、克隆状态/计数六元
+  灭绝钉、21 键链式引号钉、`jitterInhibit3ee` 全仓灭绝钉）；硬版本钉 → 1.19.4。
+
+### Caveats
+
+- 窗内活帧改写连续后的落地率**待本固件实车验证**（证据链 = 同源双 CAN beta16 回归
+  数据 + 机制回收论证）；下次实车直接读：直落 FSD 率（目标回 beta15 水平以上）、
+  击落次数/120s（目标 ≤10）、`bit46Shots`（应 ≈ 周期数，窗内不再增长）。
+- 「不甩」仍为单车小样本（同一辆车、同一驾驶者）；不外推到其他车辆。
+- v1.19.3 已公开发版且含本回归——发布后在其 GitHub Release notes 加注「已知回归：
+  FSD 无法落地，请升级 v1.19.4」。
+
 ## [1.19.3] - 2026-09-15
 
 ### Changed
