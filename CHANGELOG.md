@@ -8,69 +8,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [1.19.4] - 2026-09-16
 
-### 实车回归定案（同源双 CAN beta16 两段 120s CSV + 状态图，2026-09-16）
+### Field regression verdict (same-source dual-CAN beta16, two 120s CSVs + status photo, 2026-09-16)
 
-**症状（Jordan 实车，双 CAN beta16 = 本固件 v1.19.3 的逐字同源机）**：基本无法激活
-落地 FSD，打开推杆开启 AP 就报错、退出。
+**Symptom (Jordan's vehicle; dual-CAN beta16 runs the verbatim-same machine as this firmware's v1.19.3)**: FSD landing became nearly impossible — engaging the stalk to open AP errors out and exits.
 
-| 指标 | beta16（=v1.19.3） | beta15（=v1.19.2） |
+| Metric | beta16 (= v1.19.3) | beta15 (= v1.19.2) |
 |---|---|---|
-| 击落（可用性下降）次数/120s | **53-58** | 9-11 |
-| 击落落在克隆帧后 <250ms | 85-88% | — |
-| 2↔1 可用性震荡 | 5×/120s（与 200ms hold 节奏同步） | — |
-| 窗内人工推杆 EAP 落地 | **0/21** | 17/21 |
-| 防甩取消命中 | 21/21 无恙 | 21/21 |
-| TX 帧账目 | 1613 全平（T 帧双记折半后） | — |
+| Availability knockdowns / 120s | **53-58** | 9-11 |
+| Knockdowns landing <250ms after a clone frame | 85-88% | — |
+| 2↔1 availability oscillation | 5×/120s (synced to the 200ms hold cadence) | — |
+| In-window manual stalk EAP landings | **0/21** | 17/21 |
+| Anti-jerk cancel hits | 21/21 unharmed | 21/21 |
+| TX frame ledger | 1613 fully reconciled (after halving double-counted T frames) | — |
 
-**根因链（数据定案）**：
+**Root-cause chain (data-confirmed)**:
 
-1. v1.19 自创「procedure 期间暂停基础路径活帧改写」（`jitterInhibit3ee` + gate 内
-   `procedureActive()` 早退，注释谎称是 LittleGong 的 `jitter_state != 0` 互斥）→
-   Arming/Disengaging 期间 0x3EE 总线上我方只剩裸克隆帧；
-2. v1.19.2 refresh + v1.19.3 hold 把克隆剂量 2帧/周期 → ~44帧/周期（200ms 节奏 ×
-   10s 窗）；
-3. 克隆帧形态自相矛盾（`00 00 00 D0 20 43 02 80`：byte5|=0x43 置偏移使能位却不写
-   偏移字段、byte3 洗用户偏移 EC→D0、byte6/7 照抄原生模板、200ms 自由节奏脱离
-   载波）——车端逐帧降可用性。对照组基础路径活帧改写 `00 00 00 EC 20 43 04 9E`
-   （byte3/5/6/7 联动自洽、跟载波）车全天接受、零击落聚集。
+1. v1.19 invented a "pause the base-path live-frame rewrite while a procedure runs" rule (`jitterInhibit3ee` + the `procedureActive()` early-exit inside the gate; the comment falsely attributed it to LittleGong's `jitter_state != 0` mutex) — during Arming/Disengaging our only 0x3EE traffic on the bus was the bare clone frames;
+2. the v1.19.2 refresh + v1.19.3 hold amplified the clone dose from 2 to ~44 frames/cycle (200ms cadence × 10s window);
+3. the clone frame shape is self-contradictory (`00 00 00 D0 20 43 02 80`: byte5|=0x43 sets the offset-enable bits but never writes the offset field, byte3 washes the user offset EC→D0, bytes 6/7 copy the native template verbatim, and the free-running 200ms cadence leaves the carrier) — the car docked availability frame by frame. The control group — the base path's live-frame rewrite (`00 00 00 EC 20 43 04 9E`, bytes 3/5/6/7 mutually consistent, riding the carrier) — was accepted all day with zero knockdown clustering.
 
-**LittleGong 对齐裁决**（本轮对 ColorBlack_T-1.3.8 固件 strings 复核）：JITTER 状态机
-日志（`Active Procedure: ARMING / DISENGAGING / Rengaged`、`[JITTER] FSD 0x3EE
-bit46=1 sent`、`no cached 0x3EE/0x045`）与基础写入器 `g_can_send_frame_0x3EE`
-**并存**，全固件无任何「暂停/互斥」语义日志串——对方核心 bit46 注入连续运行，
-JITTER 机器与之共存；其机器在取消→重挂间什么都不做，唯一克隆发射 = arming 单发。
-v1.19 注释的互斥说法是我们自创的误植。
+**LittleGong alignment verdict** (this round's strings re-check of ColorBlack_T-1.3.8): the JITTER state-machine log strings (`Active Procedure: ARMING / DISENGAGING / Rengaged`, `[JITTER] FSD 0x3EE bit46=1 sent`, `no cached 0x3EE/0x045`) coexist with the base writer `g_can_send_frame_0x3EE`, and the firmware contains no pause/mutex log strings anywhere — their core bit46 injection runs continuously and the JITTER machine coexists with it; between cancel and re-request their machine does nothing, and the only clone emission is the arming one-shot. The mutex claim in our v1.19 comment was our own invention, mis-attributed.
 
-### Fixed（三删两留，与双 CAN 4.5.0-beta17 逐字同源；取消泵常量/时序零改动）
+### Fixed (three deletions, two keeps — verbatim in sync with dual-CAN 4.5.0-beta17; cancel-pump constants/timing untouched)
 
-- **删 hold**（v1.19.3 回归放大器）：`kHoldGapMs`/`holdActive_`/`lastHoldTxMs_`/
-  tick() hold 块/`bit46Holds` 计数+JSON 键+UI 格；
-- **删 refresh**（v1.19.2 自创、LittleGong 无此行为；克隆恰在 0x42 重挂前毒化
-  可用性）：pending 队列/`bit46Refreshes` 计数+JSON 键+UI 格；
-- **删基础路径暂停 + Disengaging 窗豁免**（v1.19 自创）：gate 内 `procedureActive()`
-  早退块原位换成 `inDisengagingWait()` 豁免（仍居 canActive/OTA/handler 三道
-  fail-closed 之后、gate-off 早真之前——窗内车在 0x399 state 1/2 会被 plain AP 门
-  否决，豁免恢复 beta13 资格窗机制；Arming 车已啮合 state 3..6 无需豁免）；删
-  `jitterInhibit3ee`（mux0/mux1 两处安装）；保留 `jitterObserve3ee`（arming 单发
-  模板缓存）。一个豁免覆盖 checkAD 两道门。效果：窗口内基础 bit46 活帧改写全程
-  连续（跟载波、字段自洽）；
-- **保留**：arming 单发（LittleGong 解码行为，1帧/周期）、10s Disengaging 窗
-  （`kDisengWaitMs`=10000）、sessionCap 删除、取消泵全部冻结件（47ms/3ms/16帧/CRC）；
-- 诊断面 jitter 对象 23→21 键（−bit46Refreshes −bit46Holds）；UI「bit46 / 刷新 /
-  保持」三数格 →「bit46 单发」（id jitter-frames 保留）；webui_simulator.py 镜像同步；
-- `env:native_jitter` 45→41 例（删 hold×3 + refresh×3，改写窗内零克隆灭绝回归，
-  新增 `inDisengagingWait()` 访问器钉）；pytest 契约同步（gate 函数体双钉：
-  `procedureActive` 灭绝 + `inDisengagingWait` 正向豁免序钉、克隆状态/计数六元
-  灭绝钉、21 键链式引号钉、`jitterInhibit3ee` 全仓灭绝钉）；硬版本钉 → 1.19.4。
+- **DELETE hold** (the v1.19.3 regression amplifier): `kHoldGapMs` / `holdActive_` / `lastHoldTxMs_` / the tick() hold block / the `bit46Holds` counter + JSON key + UI cell;
+- **DELETE refresh** (our v1.19.2 invention; LittleGong has no such behavior, and the clone poisoned availability right before the 0x42 re-request): the pending queue / the `bit46Refreshes` counter + JSON key + UI cell;
+- **DELETE the base-path pause + add a Disengaging-window carve-out** (the v1.19 invention): the `procedureActive()` early-exit inside the gate is replaced in place by an `inDisengagingWait()` carve-out (still after the canActive/OTA/handler fail-closed trio, before the gate-off early-true — in-window the car sits at 0x399 state 1/2 where the plain AP gate would veto bit46; the carve-out restores the beta13 qualification-window mechanism; Arming needs none, the car is engaged at state 3..6); `jitterInhibit3ee` is deleted (both mux0/mux1 installs); `jitterObserve3ee` stays (the arming one-shot's template cache). One carve-out covers both checkAD gates. Effect: in-window bit46 continuity is the base path's live-frame rewrite again (on-carrier, field-consistent);
+- **KEEP**: the arming one-shot (LittleGong-decoded behavior, 1 frame/cycle), the 10s Disengaging window (`kDisengWaitMs`=10000), the session-cap deletion, and every frozen cancel-pump constant (47ms/3ms/16 frames/CRC);
+- Diagnostics: the jitter object goes 23→21 keys (−`bit46Refreshes` −`bit46Holds`); the UI triple cell "bit46 / refresh / hold" becomes the single "bit46 one-shot" (the `jitter-frames` id is kept); webui_simulator.py mirror synced;
+- `env:native_jitter` 45→41 cases (hold×3 + refresh×3 deleted, in-window zero-clone extinction regressions rewritten, an `inDisengagingWait()` accessor pin added); the pytest contract follows (gate-body double pin: `procedureActive` extinction + positive `inDisengagingWait` ordering, a six-token clone-state/counter extinction pin, the 21-key chained-quote pin, a repo-wide `jitterInhibit3ee` extinction pin); hard version pin → 1.19.4.
 
 ### Caveats
 
-- 窗内活帧改写连续后的落地率**待本固件实车验证**（证据链 = 同源双 CAN beta16 回归
-  数据 + 机制回收论证）；下次实车直接读：直落 FSD 率（目标回 beta15 水平以上）、
-  击落次数/120s（目标 ≤10）、`bit46Shots`（应 ≈ 周期数，窗内不再增长）。
-- 「不甩」仍为单车小样本（同一辆车、同一驾驶者）；不外推到其他车辆。
-- v1.19.3 已公开发版且含本回归——发布后在其 GitHub Release notes 加注「已知回归：
-  FSD 无法落地，请升级 v1.19.4」。
+- The landing rate under continuous in-window live-frame rewrite awaits this firmware's own field verification (the evidence chain is the same-source dual-CAN beta16 regression data + the mechanism-restoration argument); the next field session reads directly: direct-FSD landing rate (target: back above beta15 levels), knockdowns per 120s (target ≤10), `bit46Shots` (should ≈ cycle count — it no longer grows inside the window).
+- "No jerk" remains a single-vehicle small sample (same car, same driver); not generalized to other vehicles.
+- v1.19.3 was publicly released and contains this regression — its release page now carries a known-regression banner pointing here, and its downloadable assets have been withdrawn.
 
 ## [1.19.3] - 2026-09-15
 
