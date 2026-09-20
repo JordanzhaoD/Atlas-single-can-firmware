@@ -35,8 +35,9 @@ class RemoveBottomBlocksTests(UiV11RedesignTests):
             self.assert_absent(t)
 
     def test_retained_neighbors_present(self):
-        # 相邻保留块
-        self.assert_present("Legacy CAN-A 诊断")
+        # 相邻保留块（v1.20: "Legacy CAN-A 诊断" 卡随首页瘦身删除；
+        # "AP 注入安全" 卡移驻 FSD 防护页，token 仍在。）
+        self.assert_absent("Legacy CAN-A 诊断")
         self.assert_present("AP 注入安全")
 
 

@@ -25,7 +25,8 @@ static volatile bool autoShutdownEnabled = false;
 static volatile bool wifiAutoOffEnabled = false;
 static volatile uint32_t lastCanActivityMs = 0;
 static volatile uint32_t lastWebActivityMs = 0;
-static volatile bool wifiStaDisabled = false; // STA已关闭标记
+static volatile bool wifiStaDisabled = false;       // STA已关闭标记
+static volatile bool wifiStaRestorePending = false; // Web活动后待恢复STA
 
 // Forward declarations for Arduino/ESP-IDF functions used
 // These are available in the ESP-IDF/Arduino environment
@@ -37,7 +38,10 @@ extern unsigned long millis();
 // ── 初始化 ───────────────────────────────────────────
 inline void dashPowerMgmtConfigureWake()
 {
-    esp_sleep_enable_ext0_wakeup(DASH_WAKE_PIN, 1);
+    // CAN idle bus = recessive = transceiver RXD HIGH; dominant (traffic) = LOW.
+    // Wake on level 0 so only real bus traffic wakes the device — level 1
+    // would fire immediately on an idle bus and sleep would never hold.
+    esp_sleep_enable_ext0_wakeup(DASH_WAKE_PIN, 0);
 }
 
 inline void dashPowerMgmtInit()
@@ -57,11 +61,26 @@ inline void dashPowerMgmtTouchCan()
 }
 
 // ── Web活动更新 ──────────────────────────────────────
-// Also signals that STA should be restored if it was disabled
+// Also requests STA restore if it was disabled by the idle timeout.
+// The flag is left set until the main loop consumes it, so the STA
+// suppression in dashCheckWifi stays armed until the restore path runs.
 inline void dashPowerMgmtTouchWeb()
 {
     lastWebActivityMs = millis();
-    wifiStaDisabled = false; // Signal to restore STA in next loop
+    if (wifiStaDisabled)
+        wifiStaRestorePending = true;
+}
+
+// Main loop calls this after the auto-off check: returns true exactly once
+// per restore request so the caller can bring WIFI_AP_STA back and schedule
+// a reconnect.
+inline bool dashPowerMgmtConsumeStaRestore()
+{
+    if (!wifiStaRestorePending)
+        return false;
+    wifiStaRestorePending = false;
+    wifiStaDisabled = false;
+    return true;
 }
 
 // ── 主循环检查 ───────────────────────────────────────

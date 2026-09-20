@@ -6,6 +6,57 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.20.0] - 2026-09-20
+
+Port of the dual-CAN 5.0-beta01/beta02 UI consolidation and power-management
+fixes to the single-CAN firmware. JITTER / anti-jerk mechanism untouched
+(v1.19 field-frozen).
+
+### Changed
+
+- Overview slimmed for clarity: the Legacy runtime-status card, the Legacy
+  CAN-A diagnostics card, and the five experiment switch rows inside the FSD
+  injection policy card are removed; the three policy cards and the four
+  status tiles stay, and all backend routes/JSON keys survive (UI-only removal).
+- AP injection safety card moved from the overview to the FSD defense page,
+  ordered AP gate → AP auto-restore → AP injection safety → 8.3.6 anti-jerk.
+- Emergency controls (reboot / reset counters) moved from the drive page to
+  the overview, visible on both desktop and phone.
+- Power management card moved from the overview (invisible on phones behind
+  display:none) to the hardware page, reachable on both surfaces; DOM ids
+  renamed `ov-*` → `hw-*` and the card gained a live idle line
+  (CAN idle / Web idle / STA state).
+
+### Removed
+
+- Hardware-page AP Restore card (the defense page now owns both AP gate
+  controls); its duplicate sync helpers (`saveApGate` / `updateApGateControl`)
+  deleted with it.
+- Legacy experiment helpers (`saveLegacyFsdExperimental` / `saveLegacyOffset`
+  / `saveLegacyOverride` / `saveLegacyVision`); the smart-speed manual offset
+  is the single offset entry point.
+
+### Fixed
+
+- Power-management toggles never persisted (present since Phase 1): the two
+  /power_mgmt submissions passed a string as postForm's second argument, so
+  for...in iterated character indices and the request body degraded to
+  `0=t&1=r...` — hasArg() stayed false and every toggle snapped back. Both
+  calls (and the HW3 slew toggle) now submit object forms, with a contract
+  regex banning string-form postForm calls repo-wide.
+- WiFi STA auto-off was fought by the reconnect rotator (dashCheckWifi
+  re-enabled WIFI_AP_STA within seconds); STA-down now suppresses the rotator
+  and web activity arms a one-shot restore that brings WIFI_AP_STA back and
+  schedules a reconnect.
+- Auto-shutdown deep sleep woke immediately (ext0 level 1): an idle CAN bus
+  holds the transceiver RXD high; wake level corrected to 0 so only dominant
+  traffic (real bus activity) wakes the device.
+- /status now exposes `canIdleMs` / `webIdleMs` / `wifiStaDisabled` for the
+  new idle line and bench verification.
+- One-shot NVS migration `ui_rst_120` clears the five dead experiment-switch
+  keys (`lfsd_m1` / `lfsd_prof` / `lfsd_vis` / `fg` / `fi`) so stale enabled
+  states cannot linger.
+
 ## [1.19.4] - 2026-09-16
 
 ### Field regression verdict (same-source dual-CAN beta16, two 120s CSVs + status photo, 2026-09-16)

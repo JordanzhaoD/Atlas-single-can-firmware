@@ -1763,6 +1763,17 @@ static void dashLoadPrefs()
 {
     prefs.begin(PREFS_NS, false);
     dashClearLegacyOptionPrefs();
+    // 一次性 UI 安全重置：5 个实验开关的 UI 已删除，清掉其持久化键，
+    // 防止旧 NVS 状态暗中影响后端（后端 JSON/路由保留，仅 UI 删除）
+    if (!prefs.getBool("ui_rst_120", false))
+    {
+        prefs.remove("lfsd_m1");
+        prefs.remove("lfsd_prof");
+        prefs.remove("lfsd_vis");
+        prefs.remove("fg");
+        prefs.remove("fi");
+        prefs.putBool("ui_rst_120", true);
+    }
     bool hasStoredHw = prefs.isKey("hw");
     uint8_t storedHw = prefs.getUChar("hw", DASH_DEFAULT_HW);
     uint8_t storedDefaultHw = prefs.getUChar("hw_def", kDashUnsetU8);
@@ -3080,6 +3091,13 @@ static void handleStatus()
     j += autoShutdownEnabled ? "true" : "false";
     j += ",\"wifiAutoOff\":";
     j += wifiAutoOffEnabled ? "true" : "false";
+    // 功耗可观测性：两个空闲计时 + STA 是否已被自动关闭（UI 功耗卡只读行）
+    j += ",\"canIdleMs\":";
+    j += (unsigned long)(millis() - lastCanActivityMs);
+    j += ",\"webIdleMs\":";
+    j += (unsigned long)(millis() - lastWebActivityMs);
+    j += ",\"wifiStaDisabled\":";
+    j += wifiStaDisabled ? "true" : "false";
     j += ",\"fogStrategy\":";
     j += (int)dashRearFogStrategy;
     j += ",\"strobeCont\":";
@@ -5088,7 +5106,10 @@ static void performAutoUpdate(); // forward decl, defined below
 static void dashCheckWifi()
 {
     static unsigned long lastCheck = 0;
-    if (wifiNetworkCount == 0)
+    // Suppress the reconnect rotation while the idle timeout has shut STA down;
+    // otherwise dashRotateAndConnect() forces WIFI_AP_STA and pulls it back
+    // within seconds, undoing the power save (restore runs via the main loop).
+    if (wifiNetworkCount == 0 || wifiStaDisabled)
         return;
     unsigned long now = millis();
     if (!staConnected && !staConnectAttemptActive && staRetryAt > 0 && (long)(now - staRetryAt) >= 0)
@@ -8104,9 +8125,26 @@ static void mcpDashboardLoop()
     {
         WiFi.mode(WIFI_AP);
         dashPowerMgmtMarkWifiDisabled();
+        // 同步 STA 状态机，防止 web 任务的重连循环立刻把它拉回
+        staConnected = false;
+        staConnectAttemptActive = false;
+        staRetryAt = 0;
         dashLog("[PWR] WiFi STA auto-off (idle timeout)");
     }
+    // Web 活动（面板重新打开）→ 恢复 STA。delay 1500ms 错开刚建立的 AP 会话
+    else if (dashPowerMgmtConsumeStaRestore())
+    {
+        if (WiFi.getMode() != WIFI_AP_STA)
+            WiFi.mode(WIFI_AP_STA);
+        dashScheduleSTAConnect(1500);
+        dashLog("[PWR] Web activity detected, restoring WiFi STA");
+    }
     // Phase 1: 自动关机检查（deep sleep）
+    if (autoShutdownEnabled && (millis() - lastCanActivityMs) > CAN_TIMEOUT_MS)
+    {
+        dashLog("[PWR] CAN idle >5min, entering deep sleep (wake on CAN traffic)");
+        fflush(stdout);
+    }
     dashPowerMgmtTick();
 }
 

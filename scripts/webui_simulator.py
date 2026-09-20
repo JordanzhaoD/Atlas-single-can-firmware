@@ -51,6 +51,7 @@ class SimState:
         self.ota_clear_count = 0
         self.auto_shutdown = False
         self.wifi_auto_off = False
+        self._sim_boot = time.time()  # v1.20: canIdleMs 模拟基准
         self.speed_strategy = "auto"
         self.speed_custom = {"manualPct": 0, "autoMinPct": -5, "autoMaxPct": 15, "cp1": 0, "cp2": 0, "cp3": 0, "cp4": 0}
         self.light_enabled = False
@@ -214,6 +215,10 @@ class SimState:
             "vehicleOta": self.vehicle_ota,
             "autoShutdown": self.auto_shutdown,
             "wifiAutoOff": self.wifi_auto_off,
+            # v1.20: 功耗空闲观测三键（镜像固件 /status，供 UI 空闲行动态模拟）
+            "canIdleMs": int((time.time() - self._sim_boot) * 1000) % 300000,
+            "webIdleMs": int(random.random() * 90000),
+            "wifiStaDisabled": False,
             "fogStrategy": self.rear_fog_value,
             "strobeCont": False,
             "dndVolume": self.dnd_volume,

@@ -139,8 +139,14 @@ class WifiSettingsRegressionTests(unittest.TestCase):
         self.assertIn('esp_log_level_set("httpd_txrx", ESP_LOG_ERROR);', self.runtime)
 
     def test_ap_injection_gate_setting_is_persisted_and_exposed(self) -> None:
-        expected_ui_ids = ["ap-gate-tgl"]
-        expected_ui_fields = ["saveApGate()", "updateApGateControl(d)"]
+        # v1.20: 硬件页 AP Restore 卡（ap-gate-tgl + hw-ap-restore）删除，
+        # 防护页 ap-core-gate-tgl / ap-auto-restore-tgl 成唯一 UI 控制面。
+        expected_ui_ids = ["ap-core-gate-tgl", "ap-auto-restore-tgl"]
+        expected_ui_fields = ["saveApGateControls()", "renderApInjectionState"]
+        removed_ui_tokens = ["ap-gate-tgl", "hw-ap-restore", "saveApGate()", "updateApGateControl"]
+        for token in removed_ui_tokens:
+            with self.subTest(removed_ui_token=token):
+                self.assertNotIn(token, self.ui)
 
         for element_id in expected_ui_ids:
             with self.subTest(ui_id=element_id):

@@ -100,7 +100,9 @@ class LegacyOffsetModeCardsTests(TouchUnifyTests):
 
 
 class StepperConversionsTests(TouchUnifyTests):
-    SEVEN = ["legacy-offset-manual", "legacy-smooth-rate", "legacy-offset-inp",
+    # v1.20: legacy-offset-inp 随 FSD 注入策略卡的实验开关行删除
+    # （legacy-offset-manual 是唯一速度偏移入口）→ 7 stepper 变 6。
+    SEVEN = ["legacy-offset-manual", "legacy-smooth-rate",
              "legacy-pct-low", "legacy-pct-mid", "legacy-pct-high", "legacy-pct-vhigh"]
 
     def test_all_seven_have_steppers(self):

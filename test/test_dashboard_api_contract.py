@@ -258,9 +258,11 @@ class DashboardApiContractTests(unittest.TestCase):
 
     def test_generated_dashboard_header_contains_task1_ui_contract_tokens(self) -> None:
         """Generated dashboard header must stay synchronized with Task 1 source UI contracts."""
-        # ("ap-delay-select" removed in v1.18 with the AP-settle delay feature.)
+        # ("ap-delay-select" removed in v1.18 with the AP-settle delay feature;
+        #  "ap-gate-tgl" removed in v1.20 with the hardware AP Restore card —
+        #  the defense-page "ap-core-gate-tgl" is the surviving toggle.)
         for token in [
-            "ap-gate-tgl",
+            "ap-core-gate-tgl",
             "mob-more-single",
             "renderPluginsStatus",
             "/plugins/status",
@@ -676,7 +678,7 @@ class DashboardApiContractTests(unittest.TestCase):
         # apDelayMs / ap_delay_ms / ap_dly / 稳定计时中 are gone with the
         # delay chain — see test_ap_settle_delay_chain_removed_in_v118.)
         for token in [
-            'id="ap-gate-tgl"',
+            'id="ap-core-gate-tgl"',
             'id="ap-auto-restore-tgl"',
             'saveApGateControls()',
             'renderApInjectionState',
@@ -687,6 +689,17 @@ class DashboardApiContractTests(unittest.TestCase):
         ]:
             with self.subTest(token=token):
                 self.assertIn(token, self.ui)
+
+        # v1.20: hardware-page AP Restore card (and its duplicate gate toggle)
+        # is gone; the defense page owns both controls now.
+        for token in [
+            'id="ap-gate-tgl"',
+            'id="hw-ap-restore"',
+            'saveApGate()',
+            'updateApGateControl',
+        ]:
+            with self.subTest(removed_token=token):
+                self.assertNotIn(token, self.ui)
 
         for token in [
             r'\"apInjectionState\"',
@@ -955,21 +968,23 @@ class DashboardApiContractTests(unittest.TestCase):
                 self.assertIn(token, self.dash)
 
     def test_legacy_can_a_health_ui_labels_are_present(self) -> None:
+        # v1.20: the Legacy CAN-A 诊断 overview card was removed with the
+        # overview slim-down; the backend JSON keys stay (only the UI died).
         for token in [
             'Legacy CAN-A 诊断',
-            '0x3EE mux0',
-            '0x3EE mux1',
             'TWAI 状态',
             'TEC/REC',
-            'TX失败',
-            'RX丢失',
-            '健康状态',
             '最后阻止原因',
+        ]:
+            with self.subTest(removed_token=token):
+                self.assertNotIn(token, self.ui)
+                self.assertNotIn(token, self.ui_gen)
+        for token in [
+            '0x3EE mux0',
             'Tesla Controller 对齐模式',
         ]:
             with self.subTest(token=token):
                 self.assertIn(token, self.ui)
-                self.assertIn(token, self.ui_gen)
 
     def test_legacy_fsd_policy_uses_selection_cards(self) -> None:
         """Regression: policy card container must use the 3-column selection-card layout."""
@@ -1018,20 +1033,18 @@ class DashboardApiContractTests(unittest.TestCase):
                 self.assertRegex(self.ui_gen, pattern)
 
     def test_legacy_fsd_mux1_checkbox_has_unique_toggle_id(self) -> None:
-        """Regression: mux1 checkbox and toggle must not share duplicate DOM ids."""
+        """Regression: mux1 stat tile stays unique; the experiment toggle is gone (v1.20)."""
         self.assertIn('id="legacy-fsd-mux1"', self.ui)
-        self.assertIn('id="legacy-fsd-mux1-tgl"', self.ui)
-        self.assertIn("document.getElementById('legacy-fsd-mux1-tgl')", self.ui)
         self.assertEqual(self.ui.count('id="legacy-fsd-mux1"'), 1)
-        self.assertEqual(self.ui.count('id="legacy-fsd-mux1-tgl"'), 1)
+        self.assertNotIn('id="legacy-fsd-mux1-tgl"', self.ui)
+        self.assertNotIn("document.getElementById('legacy-fsd-mux1-tgl')", self.ui)
 
         mux1_id = r'\bid=(?:"legacy-fsd-mux1"|legacy-fsd-mux1)(?=[\s>/])'
         mux1_toggle_id = r'\bid=(?:"legacy-fsd-mux1-tgl"|legacy-fsd-mux1-tgl)(?=[\s>/])'
         self.assertRegex(self.ui_gen, mux1_id)
-        self.assertRegex(self.ui_gen, mux1_toggle_id)
-        self.assertIn("document.getElementById('legacy-fsd-mux1-tgl')", self.ui_gen)
+        self.assertNotRegex(self.ui_gen, mux1_toggle_id)
+        self.assertNotIn("document.getElementById('legacy-fsd-mux1-tgl')", self.ui_gen)
         self.assertEqual(len(re.findall(mux1_id, self.ui_gen)), 1)
-        self.assertEqual(len(re.findall(mux1_toggle_id, self.ui_gen)), 1)
 
     def test_twai_diagnostics_are_exposed_for_legacy_can_a(self) -> None:
         twai = (ROOT / "include" / "drivers" / "twai_driver.h").read_text(encoding="utf-8")
@@ -1120,11 +1133,11 @@ class DashboardApiContractTests(unittest.TestCase):
         """Regression: GET /config 必须存在并返回 fsdRuntime 块供 UI 回填。
 
         UI loadLegacyFsdConfig() 用 fetchJson('/config') 取 conf，再读
-        conf.fsdRuntime.legacyOffset / conf.fsdRuntime.overrideSpeedLimit 回填
-        Legacy 速度偏移输入框与重写限速开关。曾因只注册了 POST /config、缺 GET
-        路由，导致 fetchJson('/config') 取 null → 重启后输入框/开关恒显示默认
-        （NVS 实际已持久化，只是 UI 读不出来）。此测试锁住 GET /config 路由、
-        handler 返回 fsdRuntime 嵌套块，以及前后端字段契约对齐。
+        conf.fsdRuntime.legacyOffset 回填 Legacy 智能速度偏移的手动输入框。
+        曾因只注册了 POST /config、缺 GET 路由，导致 fetchJson('/config') 取
+        null → 重启后输入框恒显示默认（NVS 实际已持久化，只是 UI 读不出来）。
+        此测试锁住 GET /config 路由、handler 返回 fsdRuntime 嵌套块，以及前后
+        端字段契约对齐。
         """
         # GET /config 路由 + handler 必须存在（POST 路由同时保留）
         self.assertIn('server.on("/config", HTTP_GET, handleConfigGet);', self.dash)
@@ -1132,16 +1145,18 @@ class DashboardApiContractTests(unittest.TestCase):
         handler = re.search(r"static void handleConfigGet\(\).*?server\.send\(200", self.dash, re.S)
         self.assertIsNotNone(handler, "handleConfigGet handler missing")
         body = handler.group(0)
-        # 返回 fsdRuntime 嵌套块，含 legacyOffset/overrideSpeedLimit（与 POST 契约对齐）
+        # 返回 fsdRuntime 嵌套块，含 legacyOffset/overrideSpeedLimit（与 POST 契约对齐；
+        # overrideSpeedLimit 后端键 v1.20 仍返回，但其 UI 开关已删除）
         self.assertIn("fsdRuntime", body)
         self.assertIn("legacyOffset", body)
         self.assertIn("nvsLegacyOffset", body)
         self.assertIn("overrideSpeedLimit", body)
         self.assertIn("nvsOverrideSpeedLimit", body)
-        # UI 从 /config 的 fsdRuntime 读这两个字段（前后端契约对齐）
+        # UI 从 /config 的 fsdRuntime 读 legacyOffset 回填手动偏移框（前后端契约对齐）；
+        # v1.20: overrideSpeedLimit 的 UI 消费者随重写限速开关删除，不再回填。
         self.assertIn("fetchJson('/config')", self.ui)
         self.assertIn("conf.fsdRuntime.legacyOffset", self.ui)
-        self.assertIn("conf.fsdRuntime.overrideSpeedLimit", self.ui)
+        self.assertNotIn("conf.fsdRuntime.overrideSpeedLimit", self.ui)
 
     def test_status_mux_json_is_closed_before_phase1_fields(self) -> None:
         """The /status JSON must close mux[] before appending Phase 1 root fields."""
@@ -1487,6 +1502,72 @@ class DashboardApiContractTests(unittest.TestCase):
         self.assertIn("TWAI_RX_PIN", power_header)
         self.assertIn("dashPowerMgmtConfigureWake()", power_header)
 
+    def test_v120_power_ui_uses_object_form_post_and_hardware_page_ids(self) -> None:
+        """v1.20: power toggles must POST object forms; power card lives on the hardware page.
+
+        The dual-CAN 5.0-beta02 field bug: passing a string as postForm's second
+        argument makes for...in iterate character indices, the request body
+        degrades to 0=t&1=r..., hasArg() stays false and the toggle snaps back.
+        """
+        # Ban every string-literal second argument on both UI surfaces.
+        string_form = re.compile(r"postForm\(\s*[^,()]+,\s*['\"]")
+        self.assertRegex(self.ui, r"async function postForm\(url,data\)")
+        self.assertNotRegex(self.ui, string_form)
+        self.assertNotRegex(self.ui_gen, string_form)
+        # The two power toggles submit object forms to /power_mgmt.
+        self.assertIn("postForm('/power_mgmt',{autoShutdown:on?'1':'0'})", self.ui)
+        self.assertIn("postForm('/power_mgmt',{wifiAutoOff:on?'1':'0'})", self.ui)
+
+        # Power card migrated to pg-hardware (the old overview placement was
+        # display:none on phones); ids renamed ov-* → hw-*. Page containers are
+        # <div class="page" id="pg-..."> — data-page= only marks nav items.
+        hw_page = re.search(r'id="pg-hardware".*?id="pg-drive"', self.ui, re.S)
+        self.assertIsNotNone(hw_page)
+        for token in ["hw-auto-shutdown", "hw-wifi-auto-off", "hw-pwr-idle", "功耗管理"]:
+            with self.subTest(hardware_page_token=token):
+                self.assertIn(token, hw_page.group(0))
+                self.assertIn(token, self.ui_gen)
+        for token in ["ov-auto-shutdown", "ov-wifi-auto-off", "ov-pwr-idle"]:
+            with self.subTest(removed_overview_token=token):
+                self.assertNotIn(token, self.ui)
+                self.assertNotIn(token, self.ui_gen)
+        # poll() refreshes the idle observability line from the new /status keys.
+        self.assertIn("Math.round((d.canIdleMs||0)/1000)", self.ui)
+        self.assertIn("Math.round((d.webIdleMs||0)/1000)", self.ui)
+        self.assertIn("d.wifiStaDisabled?'STA 已自动关闭':'STA 在线'", self.ui)
+
+    def test_v120_power_mgmt_runtime_fixes_are_wired(self) -> None:
+        """v1.20: WiFi STA suppression/restore + wake polarity + /status idle keys."""
+        power_header = (ROOT / "include" / "dash_power_mgmt.h").read_text(encoding="utf-8")
+        # Wake polarity: CAN idle bus is recessive (HIGH); level 1 would fire
+        # immediately and deep sleep would never hold.
+        self.assertIn("esp_sleep_enable_ext0_wakeup(DASH_WAKE_PIN, 0)", power_header)
+        self.assertNotIn("esp_sleep_enable_ext0_wakeup(DASH_WAKE_PIN, 1)", power_header)
+        # STA auto-off suppression + one-shot web-triggered restore.
+        self.assertIn("wifiStaRestorePending", power_header)
+        self.assertIn("dashPowerMgmtConsumeStaRestore", power_header)
+        self.assertIn("wifiNetworkCount == 0 || wifiStaDisabled", self.dash)
+        self.assertIn("dashPowerMgmtConsumeStaRestore()", self.dash)
+        self.assertIn("[PWR] Web activity detected, restoring WiFi STA", self.dash)
+        # /status exposes the three observability keys. C++ emission escapes the
+        # quotes (j += ",\"canIdleMs\":"), so pin the escaped source form.
+        for token in [',\\"canIdleMs\\":', ',\\"webIdleMs\\":', ',\\"wifiStaDisabled\\":']:
+            with self.subTest(status_key=token):
+                self.assertIn(token, self.dash)
+
+    def test_v120_legacy_experiment_switches_are_ui_reset_once(self) -> None:
+        """v1.20: five experiment-switch NVS keys are cleared once via ui_rst_120 marker."""
+        load_prefs = re.search(r"static void dashLoadPrefs\(\).*?\n\}", self.dash, re.S)
+        self.assertIsNotNone(load_prefs)
+        body = load_prefs.group(0)
+        self.assertIn('prefs.getBool("ui_rst_120", false)', body)
+        self.assertIn('prefs.putBool("ui_rst_120", true)', body)
+        for nv_key in ["lfsd_m1", "lfsd_prof", "lfsd_vis", "fg", "fi"]:
+            with self.subTest(cleared_key=nv_key):
+                self.assertIn(f'prefs.remove("{nv_key}")', body)
+        # Backend routes/JSON stay (UI-only removal).
+        self.assertIn('"mux1"', self.dash)
+
     def test_phase2_speed_strategy_syncs_new_offset_mode(self) -> None:
         """/speed_strategy must drive the new speed algorithm mode and persist it."""
         self.assertIn("offsetMode = dashSpeedStrategy;", self.dash)
@@ -1726,14 +1807,22 @@ class DashboardApiContractTests(unittest.TestCase):
             "clampNum('legacy-pct-vhigh',10,0,63)",
             "ls.lastSentOffsetRaw!==undefined",
             "syncLegacyOffsetInputs('legacy-offset-manual')",
-            "syncLegacyOffsetInputs('legacy-offset-inp')",
-            "legacyOffset:clampNum('legacy-offset-inp',0,0,33)",
+            "legacyOffset:clampNum('legacy-offset-manual',0,0,33)",
             # v1.18: minimal_inject left the strip; ap_re_request joined it.
             # v1.19: ap_re_request renamed jitter with the coordinator→JITTER swap.
             "d.abort_guard||d.jitter||d.bionic_steering||d.speed_no_disturb||d.ap_eap_compatible||d.dnd_volume||d.dnd_speed",
         ]:
             with self.subTest(token=token):
                 self.assertIn(token, self.ui)
+        # v1.20: the standalone offset stepper (legacy-offset-inp) died with
+        # the experiment switch row — manual is the only offset entry point.
+        for token in [
+            "syncLegacyOffsetInputs('legacy-offset-inp')",
+            "legacyOffset:clampNum('legacy-offset-inp',0,0,33)",
+            'id="legacy-offset-inp"',
+        ]:
+            with self.subTest(removed_token=token):
+                self.assertNotIn(token, self.ui)
         self.assertNotIn('max="30" id="legacy-smooth-rate"', self.ui)
         self.assertNotIn('max="50" id="legacy-pct-low"', self.ui)
         self.assertNotIn("clampNum('legacy-smooth-rate',5,1,30)", self.ui)
@@ -2449,7 +2538,6 @@ class DashboardApiContractTests(unittest.TestCase):
     def test_ui_explains_legacy_real_wiring_states(self) -> None:
         # Runtime / backend-backed Legacy real-wiring copy stays in the UI.
         for token in [
-            "Legacy 运行时状态",
             "FSD 注入策略",
             "稳定模式",
             "实验模式",
@@ -2460,6 +2548,9 @@ class DashboardApiContractTests(unittest.TestCase):
         ]:
             with self.subTest(token=token):
                 self.assertIn(token, self.ui)
+        # v1.20: the Legacy 运行时状态 overview card was removed (its five
+        # readouts moved nowhere — the diag JSON keys all survive backend-side).
+        self.assertNotIn("Legacy 运行时状态", self.ui)
 
         # Task 2 (UI V1.1) removed the three low-value static display cards
         # from the overview bottom: 维修模式 0x339, 方向盘免打扰 0x3C2 and the
@@ -2573,7 +2664,9 @@ class DashboardApiContractTests(unittest.TestCase):
             'id="m-fps"',
             'id="m-alert"',
             '现场遥控',
-            '底部导航',
+            # v1.20: danger ops moved onto the home page itself (紧急控制 card);
+            # the old copy pointed at the bottom-nav More sheet.
+            '紧急控制',
         ]:
             with self.subTest(token=token):
                 self.assertIn(token, self.ui)
@@ -2637,8 +2730,9 @@ class DashboardApiContractTests(unittest.TestCase):
             'class="mobile-risk-note"',
             '现场遥控',
             '长按启用',
-            '危险操作已收纳',
-            '底部导航',
+            # v1.20: risk note rewritten — danger ops consolidated into the
+            # home-page 紧急控制 card, not the bottom-nav More sheet.
+            '危险操作已收拢到首页「紧急控制」',
         ]:
             with self.subTest(token=token):
                 self.assertIn(token, self.ui)
@@ -2971,7 +3065,7 @@ class DashboardApiContractTests(unittest.TestCase):
         version = self.version.strip()
         # Hard version pin (dual-CAN contract convention): an accidental
         # VERSION bump without the full release pass must fail loudly here.
-        self.assertEqual("1.19.4", version)
+        self.assertEqual("1.20.0", version)
         # VERSION accepts the project's two-part release form (1.10) and the
         # existing three-part form used by older releases.
         self.assertRegex(version, r"^\d+\.\d+(?:\.\d+)?$", f"VERSION file malformed: {version!r}")
