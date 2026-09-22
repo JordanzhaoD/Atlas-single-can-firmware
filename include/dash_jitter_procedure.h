@@ -74,68 +74,35 @@ inline uint8_t counterOf(const uint8_t data[8])
 //      a state CHANGE runs the machine now.
 //   2. The event-2 re-request passes the same `cycles_ < 1` gate as event
 //      6 — one re-request per period, so a 1<->2 bounce cannot re-fire it.
-//   3. Session give-up (ours, not LittleGong's; DELETED in v1.19.3 — see
-//      the amendments below): a disengage cycle that ends WITHOUT the
-//      vehicle re-engaging (states 3/6 after our 0x42) counted as one
-//      failed cycle; after one such cycle the machine stood down for the
-//      rest of the drive session. Park (gear signal) or a switch/gate
-//      toggle re-opened the budget.
+//   3. Session give-up (ours, not LittleGong's): a disengage cycle that
+//      ends WITHOUT the vehicle re-engaging (states 3/6 after our 0x42)
+//      counts as one failed cycle. After kSessionFailCap consecutive
+//      failed cycles the machine stands down for the rest of the drive
+//      session — it will not keep pushing a car that refused FSD. Park
+//      (gear signal) or a switch/gate toggle re-opens the budget.
 //
-// v1.19.2 FSD-landing diagnostics (ours; the anti-jerk cycle itself is
+// v1.19.2 FSD-landing amendment (ours; the anti-jerk cycle itself is
 // FROZEN since the 2026-09-14 field pass — hundreds of opens, zero jerks):
-// landing evidence is split — state 6 -> reengagedFsd, state 3 ->
+// the same field session showed FSD starting only ~30% of attempts — the
+// rest landed EAP. The arming one-shot's unlock latch does not reliably
+// survive our own 0x41 cancel, so the 0x42 re-request re-enters a car that
+// re-picks the EAP branch. Fix: queue ONE bit46 refresh (same clone
+// builder, same <=5 s freshness gate, skipped fail-closed) when event 2
+// fires, emitted by tick() BEFORE the pump's first 0x42 frame. Landing
+// evidence is also split now: state 6 -> reengagedFsd, state 3 ->
 // reengagedEap (v1.19.1 counted both as one "reEngaged" success, which is
-// exactly why the ~30% FSD rate was invisible in the diag counters). The
-// same release added a pre-re-request bit46 refresh clone; RETIRED in
-// v1.19.4 (see below).
+// exactly why the ~30% was invisible in the diag counters).
 //
-// v1.19.3 amendments (2026-09-15 dual-CAN five-file field pass, 21/21
-// cycles with zero jerk — the cancel core stays FROZEN):
-//   1. The Disengaging wait window widens 5 s -> 10 s (kDisengWaitMs):
-//      measured vehicle response to the re-request runs 2.8..7.1 s, so
-//      the old deadline cut late landings out of the accounting. Arming
-//      keeps the 5 s deadline.
-//   2. The v1.19.1 session cap is DELETED. It billed "timeout without
-//      landing" as failure and then stood down — in the field that left
-//      3..4 lane captures completely unprotected while the car kept
-//      engaging. Every human-initiated engagement is protected now;
-//      failedCycles_ survives as a pure diagnostic (Park / toggle still
-//      clear it). The v1.19 unbounded-re-request incident stays dead:
-//      edge semantics + the cycles_<1 gate bound each period to one
-//      request regardless of the cap.
-//   The same release added a 200 ms window-hold clone pump; RETIRED in
-//   v1.19.4 (see below).
-//
-// v1.19.4 regression fix (2026-09-16 dual-CAN beta16 field pass, two
-// 120 s CSV captures): v1.19.3 made FSD landing nearly impossible (EAP
-// re-engage via stalk 17/21 -> 0/21; the one FSD landing errored out
-// 1.6 s later) while the anti-jerk core stayed perfect (21/21 cancels).
-// Root cause chain, ours alone — none of it LittleGong behavior:
-//   a. v1.19 paused the base-path live-frame rewrite while a procedure
-//      ran, on a misread "jitter_state != 0 mutex" (strings on
-//      ColorBlack_T-1.3.8: the JITTER logs and the continuous
-//      g_can_send_frame_0x3EE base writer coexist; no pause strings
-//      exist). In-window the bus carried only bare bit46 clones.
-//   b. v1.19.2/v1.19.3 amplified the clone dose 2 -> ~44 frames per
-//      cycle (refresh + 200 ms hold across the 10 s window).
-//   c. The clone shape is self-contradictory (byte5 |= 0x43 sets the
-//      offset-enable bits without writing the offset field; byte3
-//      washes the user offset EC->D0; byte6/7 copied stale; free-running
-//      200 ms cadence off-carrier) — the car knocked availability down
-//      53-58 times per 120 s (2<->1 oscillation synced to the cadence;
-//      85-88% of knocks within 250 ms of a clone), vs 9-11 on beta15.
-//      The base-path rewrite frame (byte3/5/6/7 coherent, carrier-
-//      locked) was accepted all day with zero knock clustering.
-// Fix — three deletions, two keeps (cancel-pump constants/timing stay
-// FROZEN): DELETE the base-path pause (the base bit46/offset rewrite
-// runs continuously, restoring the beta13 qualification-window
-// mechanism), DELETE the v1.19.2 refresh and the v1.19.3 hold (all
-// synthetic clones beyond the arming one-shot); KEEP the arming
-// one-shot (LittleGong-decoded, 1 frame/cycle) and the 10 s window /
-// no-session-cap accounting. New accessor inDisengagingWait(): the
-// Legacy FSD gate keys its Disengaging-window carve-out on it —
-// in-window the car sits at 0x399 state 1/2, which the plain
-// APActive(3..6) gate would veto.
+// v1.20.1 rollback note: v1.19.3/v1.19.4 once amended this machine from the
+// dual-CAN beta16/beta17 line (10 s Disengaging window, session cap
+// deleted, window-hold clones, then the refresh deleted with the base-path
+// pause lifted). That line failed in the field twice — the dual-CAN beta17
+// pass (re-requests 19/21 ignored) and, after v1.20.0 shipped the same
+// core here, the 2026-09-22 single-CAN report: FSD would not activate at
+// all with the AP gate + anti-jerk enabled. The dual-CAN beta16..beta22
+// line was voided on 2026-09-20; this file is rolled back to the exact
+// v1.19.2 shape, the last single-CAN field-validated core. Do not re-sync
+// amendments from the voided dual-CAN line without new field evidence.
 //
 // 0x488 abort (same lineage as our AbortGuard): while the procedure runs,
 // DAS_trackAngle = ((b0<<8|b1)&0x7FFF − 16384) × 0.1° is parsed; >45° aborts
@@ -167,14 +134,15 @@ struct DashJitterDiag
     bool permit = false;
     JitterPhase phase = JitterPhase::Inert;
     const char *reason = "off";
-    uint8_t apState = 0;       // last observed 0x399 low nibble
-    uint8_t cycles = 0;        // cancel/re-request cycles this period
-    uint32_t cancels = 0;      // cancel bursts started
-    uint32_t requests = 0;     // re-request bursts started
-    uint32_t reengagedFsd = 0; // landings in state 6 after our 0x42
-    uint32_t reengagedEap = 0; // landings in state 3 after our 0x42
-    uint32_t bit46Shots = 0;   // arming one-shot 0x3EE frames emitted
-    uint32_t pumpFrames = 0;   // synthetic 0x045 frames emitted
+    uint8_t apState = 0;         // last observed 0x399 low nibble
+    uint8_t cycles = 0;          // cancel/re-request cycles this period
+    uint32_t cancels = 0;        // cancel bursts started
+    uint32_t requests = 0;       // re-request bursts started
+    uint32_t reengagedFsd = 0;   // landings in state 6 after our 0x42
+    uint32_t reengagedEap = 0;   // landings in state 3 after our 0x42
+    uint32_t bit46Shots = 0;     // arming one-shot 0x3EE frames emitted
+    uint32_t bit46Refreshes = 0; // v1.19.2 pre-re-request refresh frames
+    uint32_t pumpFrames = 0;     // synthetic 0x045 frames emitted
     uint32_t txOk = 0;
     uint32_t txFail = 0;
     uint32_t steerAborts = 0;   // >45° burst aborts
@@ -196,10 +164,10 @@ struct DashJitterProcedure
     // 0x3EE one-shot template freshness (fail-closed: no fresh template ->
     // skip the shot; 1 Hz mux0 carrier makes ~1 s the normal age).
     static constexpr uint32_t kNative3eeMaxAgeMs = 5000;
-    // v1.19.3 Disengaging wait window (Arming keeps kDeadlineMs): measured
-    // vehicle response to the 0x42 re-request runs 2.8..7.1 s, so the old
-    // 5 s deadline cut late landings out of the accounting.
-    static constexpr uint32_t kDisengWaitMs = 10000;
+    // v1.19.1 session give-up: consecutive failed disengage cycles before
+    // the machine stands down for the rest of the drive session (Park or
+    // a switch/gate toggle re-opens the budget).
+    static constexpr uint8_t kSessionFailCap = 1;
 
     // ── configuration ───────────────────────────────────────────────────
     bool enabled_ = false;
@@ -233,7 +201,8 @@ struct DashJitterProcedure
     uint8_t pumpNextCounter_ = 0;
 
     // ── pending one-shot ────────────────────────────────────────────────
-    bool bit46Queued_ = false; // arming-entry one-shot (LittleGong)
+    bool bit46Queued_ = false;        // arming-entry one-shot (LittleGong)
+    bool bit46RefreshQueued_ = false; // v1.19.2 pre-re-request refresh (ours)
 
     // ── 0x488 steering angle ────────────────────────────────────────────
     float steerAngleDeg_ = 0.0f;
@@ -245,6 +214,7 @@ struct DashJitterProcedure
     uint32_t reengagedFsd_ = 0;
     uint32_t reengagedEap_ = 0;
     uint32_t bit46Shots_ = 0;
+    uint32_t bit46Refreshes_ = 0;
     uint32_t pumpFrames_ = 0;
     uint32_t txOk_ = 0;
     uint32_t txFail_ = 0;
@@ -253,8 +223,9 @@ struct DashJitterProcedure
     uint32_t apErrorResets_ = 0;
     uint32_t timeoutResets_ = 0;
 
-    // Armed = switch on AND gate open. The base 0x3EE rewrite path runs
-    // continuously regardless (v1.19.4) — the procedure never pauses it.
+    // Armed = switch on AND gate open. The base bit46 path is only paused
+    // while a procedure actually runs (procedureActive()); Idle/Normal leave
+    // the base path untouched.
     void configure(bool enabled, bool apGateOpen)
     {
         enabled_ = enabled;
@@ -265,7 +236,7 @@ struct DashJitterProcedure
         if (!enabled_)
         {
             fullReset("off");
-            failedCycles_ = 0; // diag only (v1.19.3): toggle = fresh session
+            failedCycles_ = 0; // a switch toggle re-opens the session budget
         }
         else if (!gateOpen_)
         {
@@ -284,13 +255,6 @@ struct DashJitterProcedure
     {
         return phase_ == JitterPhase::Arming || phase_ == JitterPhase::Disengaging;
     }
-    // v1.19.4: true only while the Disengaging wait window is open (event 6
-    // through landing or any reset). The Legacy FSD gate keys its window
-    // carve-out on this — in-window the car sits at 0x399 state 1/2, which
-    // the plain APActive(3..6) gate would veto, killing the very bit46
-    // continuity the re-request needs. Arming needs no carve-out (the car
-    // is engaged, 3..6, and passes the plain gate).
-    bool inDisengagingWait() const { return phase_ == JitterPhase::Disengaging; }
 
     // Permit loss mid-procedure is fail-closed like everything else here:
     // a plain reset (no lock taxonomy — the human retries), matching the
@@ -304,9 +268,9 @@ struct DashJitterProcedure
 
     // Drive-session boundary (v1.19.1): the gear signal (P) is the physical
     // end of a session. A rising Park edge ends any running cycle WITHOUT
-    // letting it count against the next session and clears the diagnostic
-    // streak — order matters, the reset's accounting runs first (this is
-    // the exit path drivers actually used in the field incident).
+    // letting it count against the next session and re-opens the budget —
+    // order matters, the reset's accounting runs first (this is the exit
+    // path drivers actually used in the field incident).
     void setVehicleParked(bool parked)
     {
         if (parked == parked_)
@@ -322,14 +286,11 @@ struct DashJitterProcedure
 
     void fullReset(const char *reason)
     {
-        // v1.19.3: the accounting below is DIAGNOSTIC ONLY (the v1.19.1
-        // session cap that consumed it is deleted — in the field it stood
-        // the machine down and left subsequent captures unprotected). A
-        // disengage cycle that never saw the vehicle re-engage (states 3/6)
-        // after our request is one failed cycle; one that did re-engage
-        // clears the streak. Arming resets are neutral (no cancel was ever
-        // sent). failedCycles_ itself survives every reset — only Park or
-        // a toggle clears it.
+        // v1.19.1 session accounting: a disengage cycle that never saw the
+        // vehicle re-engage (states 3/6) after our request is one failed
+        // cycle; one that did re-engage clears the failure streak. Arming
+        // resets are neutral (no cancel was ever sent). failedCycles_
+        // itself survives every reset — only Park or a toggle clears it.
         if (phase_ == JitterPhase::Disengaging)
         {
             if (engagedAfterRequest_)
@@ -344,6 +305,7 @@ struct DashJitterProcedure
         cycles_ = 0;
         pumpActive_ = false;
         bit46Queued_ = false;
+        bit46RefreshQueued_ = false;
         deadlineMs_ = 0;
         engagedAfterRequest_ = false;
     }
@@ -409,14 +371,21 @@ struct DashJitterProcedure
         case JitterPhase::Normal:
             if (apState == 3 && permit_)
             {
-                // v1.19.3: no session cap — every human-initiated
-                // engagement is protected (the field cap left 3..4 captures
-                // bare; each cycle is human-initiated anyway, the machine
-                // cannot loop on its own). failedCycles_ stays diagnostic.
-                phase_ = JitterPhase::Arming;
-                deadlineMs_ = nowMs + kDeadlineMs;
-                bit46Queued_ = true;
-                reason_ = "arming";
+                // v1.19.1 session cap: after kSessionFailCap consecutive
+                // failed cycles the machine stands down for the rest of the
+                // drive session. Staying in Normal is fully passive — no
+                // one-shot, no cancel, no re-request.
+                if (failedCycles_ >= kSessionFailCap)
+                {
+                    reason_ = "sessionCap";
+                }
+                else
+                {
+                    phase_ = JitterPhase::Arming;
+                    deadlineMs_ = nowMs + kDeadlineMs;
+                    bit46Queued_ = true;
+                    reason_ = "arming";
+                }
             }
             break;
         case JitterPhase::Arming:
@@ -426,7 +395,7 @@ struct DashJitterProcedure
                 // the lane-capture entry, ~200 ms ahead of the beta08 jerk
                 // window (state6 + 200..330 ms).
                 phase_ = JitterPhase::Disengaging;
-                deadlineMs_ = nowMs + kDisengWaitMs; // v1.19.3: 10 s window
+                deadlineMs_ = nowMs + kDeadlineMs;
                 startPump(1, nowMs);
                 ++cancels_;
                 reason_ = "cancel";
@@ -450,14 +419,16 @@ struct DashJitterProcedure
                 // burst (v1.19 fed every state-2 frame through here).
                 if (cycles_ < 1)
                 {
-                    // v1.19.4: no synthetic bit46 accompanies the
-                    // re-request anymore — the base-path live-frame
-                    // rewrite (restored, carrier-locked) keeps the unlock
-                    // continuous through the window; clone frames here
-                    // are what the 2026-09-16 beta16 regression traced to.
                     ++cycles_;
+                    // v1.19.2: refresh the unlock right before the
+                    // re-request — the arming one-shot's latch does not
+                    // reliably survive our own 0x41 cancel (2026-09-14
+                    // field data: ~70% of re-requests landed EAP). tick()
+                    // emits this BEFORE the pump's first 0x42 frame; a
+                    // stale template skips it fail-closed.
+                    bit46RefreshQueued_ = true;
                     startPump(2, nowMs);
-                    deadlineMs_ = nowMs + kDisengWaitMs;
+                    deadlineMs_ = nowMs + kDeadlineMs;
                     ++requests_;
                     reason_ = "reRequest";
                 }
@@ -500,9 +471,8 @@ struct DashJitterProcedure
                                : 0;
     }
 
-    // Builder for the arming one-shot (v1.19.4: the ONLY synthetic 0x3EE
-    // emission left — the v1.19.2 refresh and v1.19.3 hold clones are
-    // retired): patched clone of the freshest native 0x3EE mux0 template
+    // Shared builder for both one-shot emissions (arming shot + v1.19.2
+    // refresh): patched clone of the freshest native 0x3EE mux0 template
     // (byte5 |= 0x43 forces the unlock bit pattern LittleGong uses;
     // counter/checksum ride the clone). Returns false when no template is
     // fresh within kNative3eeMaxAgeMs — the emission is skipped fail-closed.
@@ -525,8 +495,8 @@ struct DashJitterProcedure
 
         // Deadline expiry: arming that never saw lane capture, or a
         // disengage cycle that ran out of road. Silent full reset. This
-        // runs BEFORE the one-shot block, so a reset also drops any
-        // pending emission (the queued shot must not fire after death).
+        // runs BEFORE the one-shot blocks, so a reset also drops any
+        // pending emission (a queued refresh must not fire after death).
         if (procedureActive() && deadlineMs_ != 0 &&
             static_cast<int32_t>(nowMs - deadlineMs_) >= 0)
         {
@@ -534,10 +504,7 @@ struct DashJitterProcedure
             fullReset("timeout");
         }
 
-        // One-shot bit46 at the ARMING entry (LittleGong). v1.19.4: this
-        // is the only synthetic 0x3EE the machine ever emits now — through
-        // the Disengaging window the unlock continuity is the base path's
-        // live-frame rewrite, not a clone.
+        // One-shot bit46 at the ARMING entry (LittleGong).
         if (bit46Queued_)
         {
             bit46Queued_ = false;
@@ -547,6 +514,22 @@ struct DashJitterProcedure
                 return JitterAction::Bit46Shot;
             }
             // No fresh template: skip the shot (fail-closed), cycle continues.
+        }
+
+        // v1.19.2 refresh: one more bit46 clone right before the pump's
+        // first 0x42 frame — emitted here (above the pump block) so the
+        // unlock is on the bus tens of milliseconds ahead of the synthetic
+        // re-request, the same gap LittleGong's arming shot has from the
+        // user's own double-pull.
+        if (bit46RefreshQueued_)
+        {
+            bit46RefreshQueued_ = false;
+            if (emitBit46Clone(outData, nowMs))
+            {
+                ++bit46Refreshes_;
+                return JitterAction::Bit46Shot;
+            }
+            // Stale template: skipped fail-closed, the 0x42 pump still runs.
         }
 
         // Carrier-locked 0x045 pump: only transmit riding right behind a
@@ -607,6 +590,7 @@ struct DashJitterProcedure
         d.reengagedFsd = reengagedFsd_;
         d.reengagedEap = reengagedEap_;
         d.bit46Shots = bit46Shots_;
+        d.bit46Refreshes = bit46Refreshes_;
         d.pumpFrames = pumpFrames_;
         d.txOk = txOk_;
         d.txFail = txFail_;

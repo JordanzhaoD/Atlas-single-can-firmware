@@ -49,11 +49,8 @@ void test_constants_pin_littlegong_values()
     TEST_ASSERT_EQUAL_FLOAT(45.0f, DashJitterProcedure::kSteerAbortDeg);
     TEST_ASSERT_EQUAL_FLOAT(90.0f, DashJitterProcedure::kSteerResetDeg);
     TEST_ASSERT_EQUAL_UINT32(5000, DashJitterProcedure::kNative3eeMaxAgeMs);
-    // v1.19.3 widened Disengaging wait (ours, not LittleGong's; Arming
-    // keeps kDeadlineMs=5000 above). v1.19.4: the 200 ms hold pacing
-    // constant is deleted with the hold itself — window bit46 continuity
-    // is the base path's live-frame rewrite now, not a clone cadence.
-    TEST_ASSERT_EQUAL_UINT32(10000, DashJitterProcedure::kDisengWaitMs);
+    // v1.19.1 session give-up cap (ours, not LittleGong's).
+    TEST_ASSERT_EQUAL_UINT8(1, DashJitterProcedure::kSessionFailCap);
 }
 
 void test_crc8_j1850_golden()
@@ -462,7 +459,7 @@ void test_steer_ignored_without_procedure_or_invalid_type()
     TEST_ASSERT_EQUAL(JitterPhase::Disengaging, p.diag().phase);
 }
 
-// ─── v1.19.4 window carve-out + clone extinction ─────────────────────
+// ─── base-path pause scope ────────────────────────────────────────────
 
 void test_procedure_active_only_in_arming_and_disengaging()
 {
@@ -479,98 +476,16 @@ void test_procedure_active_only_in_arming_and_disengaging()
     TEST_ASSERT_FALSE(p.procedureActive()); // reset back to Idle
 }
 
-void test_in_disengaging_wait_window_scoped_accessor()
+void test_base_path_pause_survives_gate_close_during_procedure()
 {
-    // v1.19.4: the Legacy FSD gate keys its Disengaging carve-out on this
-    // accessor — it must be window-scoped, NOT a procedureActive() alias:
-    // Arming runs while the car is engaged (0x399 state 3..6) and passes
-    // the plain APActive gate on its own, so granting it the carve-out
-    // would only widen the bypass. The two predicates deliberately diverge
-    // in Arming.
+    // Ordering contract: the mux0 head check pauses before the gate-off
+    // early-true — i.e. procedureActive() must stay observable (here: via
+    // its reset side effects) even while the switch stays on but the gate
+    // closes only AFTER the reset. The dashboard-level ordering itself is
+    // pinned by the pytest contract; here we pin the module's contribution.
     DashJitterProcedure p;
     arm(p);
-    TEST_ASSERT_FALSE(p.inDisengagingWait()); // Idle
-    p.observeDasStatus(1, 100);
-    TEST_ASSERT_FALSE(p.inDisengagingWait()); // Normal
     reachArming(p, 1000);
-    TEST_ASSERT_FALSE(p.inDisengagingWait()); // Arming: car engaged 3..6
-    TEST_ASSERT_TRUE(p.procedureActive());    // ...still procedure-active
-    reachDisengaging(p, 2000);
-    TEST_ASSERT_TRUE(p.inDisengagingWait()); // window opens at event 6
-    p.observeDasStatus(1, 2100);
-    TEST_ASSERT_TRUE(p.inDisengagingWait()); // the whole wait window
-    p.observeDasStatus(6, 2200);             // landing...
-    TEST_ASSERT_TRUE(p.inDisengagingWait()); // phase holds until reset
-    p.observeDasStatus(9, 2300);             // apError -> full reset
-    TEST_ASSERT_FALSE(p.inDisengagingWait());
-    TEST_ASSERT_FALSE(p.procedureActive());
-}
-
-void test_disengaging_window_emits_no_bit46_clones()
-{
-    // v1.19.4 regression core (2026-09-16 beta16 field pass, two 120 s
-    // CSVs): every synthetic 0x3EE clone beyond the arming one-shot is
-    // RETIRED. Through the whole Disengaging window tick() must never
-    // return Bit46Shot — in-window bit46 continuity is the base-path
-    // live-frame rewrite's job (carrier-locked, field-coherent). The
-    // retired v1.19.2 refresh + v1.19.3 hold clones carried a
-    // self-contradictory shape (byte5 |= 0x43 offset-enable bits with no
-    // offset written, byte3 washing the user offset EC->D0, stale
-    // counter/checksum, 200 ms free-run off-carrier) and the car knocked
-    // availability down 53-58x per 120 s synced to that cadence (beta15:
-    // 9-11). Fresh templates throughout — a stale-template fail-closed
-    // skip must not mask the emission.
-    DashJitterProcedure p;
-    arm(p);
-    uint8_t tmpl[8] = {0x31, 0x32, 0x33, 0x34, 0x35, 0x00, 0x36, 0x37};
-    p.observeNative3eeMux0(tmpl, 900);
-    p.observeNative045(kNative045, 1000);
-    reachDisengaging(p, 1010);
-    uint8_t out[8];
-    TEST_ASSERT_EQUAL(JitterAction::Bit46Shot, p.tick(1015, out)); // arming one-shot (kept)
-    TEST_ASSERT_EQUAL_UINT32(1, p.diag().bit46Shots);
-    p.observeDasStatus(1, 1040);
-    p.observeDasStatus(2, 1050); // re-request — no clone may precede it
-    // No fresh 0x045 carrier: the pump stays silent, so every sample must
-    // be a hard None. Samples cover the old 200 ms hold cadence and the
-    // 1 s / 4 s window depths.
-    TEST_ASSERT_EQUAL(JitterAction::None, p.tick(1055, out));
-    for (uint32_t t = 1250; t <= 5050; t += 200)
-    {
-        p.observeNative3eeMux0(tmpl, t);
-        TEST_ASSERT_EQUAL(JitterAction::None, p.tick(t, out));
-    }
-    TEST_ASSERT_EQUAL_UINT32(1, p.diag().bit46Shots); // no growth
-    // Fresh 0x045 carriers open the 0x42 pump: Stalk045 alone may speak —
-    // the burst rides carrier-locked, and bit46Shots stays pinned.
-    for (int i = 0; i < 16; ++i)
-    {
-        uint32_t t = 6000 + i * 50;
-        p.observeNative045(kNative045, t);
-        TEST_ASSERT_EQUAL(JitterAction::Stalk045, p.tick(t + 1, out));
-        TEST_ASSERT_EQUAL_UINT8(0x42, out[0]);
-    }
-    for (int i = 0; i < 4; ++i) // budget spent: silent, still clone-free
-    {
-        uint32_t t = 6800 + i * 50;
-        p.observeNative045(kNative045, t);
-        TEST_ASSERT_EQUAL(JitterAction::None, p.tick(t + 1, out));
-    }
-    TEST_ASSERT_EQUAL_UINT32(1, p.diag().bit46Shots);
-    // Late landing stands everything down; post-landing stays clone-free
-    // and the deadline (1050+10000) expires with success billing.
-    p.observeDasStatus(6, 8100);
-    TEST_ASSERT_EQUAL_STRING("reEngagedFsd", p.diag().reason);
-    p.observeNative3eeMux0(tmpl, 8500);
-    TEST_ASSERT_EQUAL(JitterAction::None, p.tick(8600, out));
-    TEST_ASSERT_EQUAL(JitterAction::None, p.tick(11050, out));
-    TEST_ASSERT_EQUAL_UINT8(0, p.diag().failedCycles);
-    // Module reset contract (carried from the retired base-path-pause
-    // test): the gate closing mid-procedure still resets to Inert.
-    p.observeDasStatus(1, 12000);
-    p.observeDasStatus(3, 12010);
-    p.observeDasStatus(6, 12020);
-    TEST_ASSERT_EQUAL(JitterPhase::Disengaging, p.diag().phase);
     p.configure(true, false);
     TEST_ASSERT_EQUAL(JitterPhase::Inert, p.diag().phase);
     TEST_ASSERT_EQUAL_STRING("apGateOff", p.diag().reason);
@@ -590,10 +505,10 @@ void test_full_reset_clears_cycle_state_keeps_diag_counters()
     TEST_ASSERT_EQUAL_UINT8(0, d.cycles);
     TEST_ASSERT_EQUAL_UINT32(1, d.cancels); // lifetime counters survive
     TEST_ASSERT_EQUAL_UINT32(1, d.apErrorResets);
-    // v1.19.3: the interrupted cycle has no re-engagement evidence, so it
-    // bills the DIAGNOSTIC streak (failedCycles 1 — the consuming session
-    // cap is deleted; re-entry is protected regardless). Park is the
-    // physical session boundary and still clears the streak.
+    // v1.19.1: the interrupted cycle had no re-engagement evidence, so it
+    // billed the session budget (failedCycles 1) — re-entry would be
+    // session-capped. Park is the physical session boundary: it re-opens
+    // the budget (this is the exit path used in the field incident).
     TEST_ASSERT_EQUAL_UINT8(1, p.diag().failedCycles);
     p.setVehicleParked(true);
     p.setVehicleParked(false);
@@ -639,26 +554,25 @@ void test_v1191_incident_replay_level_feed_terminates()
     }
     TEST_ASSERT_EQUAL_UINT32(1, p.diag().requests);    // never re-fired
     TEST_ASSERT_EQUAL_UINT32(16, p.diag().pumpFrames); // one capped burst
-    // Deadline set once at 1050+10000 (v1.19.3 widened window), never
-    // refreshed: it expires.
+    // Deadline set once at 1050+5000, never refreshed: it expires.
     p.observeNative045(kNative045, 6100);
     TEST_ASSERT_EQUAL(JitterAction::None, p.tick(6101, out));
-    TEST_ASSERT_EQUAL(JitterPhase::Disengaging, p.diag().phase); // 10 s alive
-    TEST_ASSERT_EQUAL(JitterAction::None, p.tick(11049, out));
-    TEST_ASSERT_EQUAL(JitterPhase::Disengaging, p.diag().phase);
-    TEST_ASSERT_EQUAL(JitterAction::None, p.tick(11050, out)); // boundary
     TEST_ASSERT_EQUAL(JitterPhase::Idle, p.diag().phase);
     TEST_ASSERT_EQUAL_STRING("timeout", p.diag().reason);
     TEST_ASSERT_EQUAL_UINT8(1, p.diag().failedCycles); // refused = failed
-    // v1.19.3: the session cap is DELETED — the next human FSD engage is
-    // protected again immediately (the field cap left 3..4 captures bare).
-    p.observeDasStatus(1, 12000); // Idle -> Normal
-    p.observeNative3eeMux0(kNative045, 12100);
-    p.observeDasStatus(3, 12200);
+    // Session stand-down: the next FSD engage attempt is fully passive.
+    p.observeDasStatus(1, 6500); // Idle -> Normal
+    p.observeNative3eeMux0(kNative045, 6600);
+    p.observeDasStatus(3, 6700);
+    TEST_ASSERT_EQUAL(JitterPhase::Normal, p.diag().phase);
+    TEST_ASSERT_EQUAL_STRING("sessionCap", p.diag().reason);
+    TEST_ASSERT_EQUAL(JitterAction::None, p.tick(6710, out)); // no one-shot
+    // Park re-opens the budget (the field exit), a fresh engage re-arms.
+    p.setVehicleParked(true);
+    p.setVehicleParked(false);
+    p.observeDasStatus(1, 6800);
+    p.observeDasStatus(3, 6900);
     TEST_ASSERT_EQUAL(JitterPhase::Arming, p.diag().phase);
-    TEST_ASSERT_EQUAL_STRING("arming", p.diag().reason);
-    TEST_ASSERT_EQUAL(JitterAction::Bit46Shot, p.tick(12210, out));
-    TEST_ASSERT_EQUAL_UINT8(1, p.diag().failedCycles); // diag survives
 }
 
 void test_v1191_reengage_success_keeps_protection_alive()
@@ -678,12 +592,10 @@ void test_v1191_reengage_success_keeps_protection_alive()
     TEST_ASSERT_EQUAL_STRING("reEngagedEap", p.diag().reason); // v1.19.2 split
     TEST_ASSERT_EQUAL_UINT32(1, p.diag().reengagedEap);
     p.observeDasStatus(6, 1300);
-    // Deadline from the event-2 refresh (1050+10000, v1.19.3) expires ->
-    // success billing. No fresh 0x045 carrier is introduced here on
-    // purpose: the re-request pump still has budget and would legally
-    // speak inside the widened window.
+    // Deadline from the event-2 refresh (6050) expires -> success billing.
     uint8_t out[8];
-    TEST_ASSERT_EQUAL(JitterAction::None, p.tick(11050, out));
+    p.observeNative045(kNative045, 6100);
+    TEST_ASSERT_EQUAL(JitterAction::None, p.tick(6101, out));
     TEST_ASSERT_EQUAL(JitterPhase::Idle, p.diag().phase);
     TEST_ASSERT_EQUAL_UINT8(0, p.diag().failedCycles);
     // User cancels EAP: 1 -> 2. Idle -> Normal on the 1; the 2 is inert
@@ -714,10 +626,10 @@ void test_v1191_bounce_12_fires_one_request()
     }
     TEST_ASSERT_EQUAL_UINT32(1, p.diag().requests);
     TEST_ASSERT_EQUAL_UINT8(1, p.diag().cycles);
-    // Deadline stands at the single re-request (1105+10000=11105, v1.19.3):
-    // the blocked bounce edges at 1115..1145 did not push it out.
+    // Deadline stands at the single re-request (1105+5000=6105): the
+    // blocked bounce edges at 1115..1145 did not push it out.
     uint8_t out[8];
-    TEST_ASSERT_EQUAL(JitterAction::None, p.tick(11110, out));
+    TEST_ASSERT_EQUAL(JitterAction::None, p.tick(6110, out));
     TEST_ASSERT_EQUAL(JitterPhase::Idle, p.diag().phase);
     TEST_ASSERT_EQUAL_STRING("timeout", p.diag().reason);
 }
@@ -742,7 +654,82 @@ void test_v1191_park_midcycle_does_not_poison_next_session()
     TEST_ASSERT_EQUAL(JitterPhase::Arming, p.diag().phase);
 }
 
-// ─── v1.19.2 landing split (refresh RETIRED in v1.19.4) ──────────────
+// ─── v1.19.2 pre-re-request bit46 refresh + landing split ─────────────
+
+void test_v1192_refresh_fires_before_re_request_pump()
+{
+    // The event-2 re-request queues ONE bit46 refresh, emitted by tick()
+    // BEFORE the pump's first 0x42 frame (2026-09-14 field data: the arming
+    // shot's unlock latch does not survive our own cancel — ~70% of
+    // re-requests landed EAP). A 1<->2 bounce must not re-queue it.
+    DashJitterProcedure p;
+    arm(p);
+    uint8_t tmpl[8] = {0x21, 0x22, 0x23, 0x24, 0x25, 0x00, 0x26, 0x27};
+    p.observeNative3eeMux0(tmpl, 900);
+    p.observeNative045(kNative045, 1000);
+    reachDisengaging(p, 1010);
+    uint8_t out[8];
+    TEST_ASSERT_EQUAL(JitterAction::Bit46Shot, p.tick(1015, out)); // arming shot
+    TEST_ASSERT_EQUAL_UINT32(1, p.diag().bit46Shots);
+    p.observeDasStatus(1, 1040);
+    p.observeDasStatus(2, 1050); // re-request queued + pump started
+    // No fresh 0x045 carrier yet: the ONLY emittable frame is the refresh.
+    TEST_ASSERT_EQUAL(JitterAction::Bit46Shot, p.tick(1055, out));
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(tmpl, out, 5); // same clone builder
+    TEST_ASSERT_EQUAL_UINT8(0x43, out[5]);
+    TEST_ASSERT_EQUAL_UINT8(tmpl[6], out[6]);
+    TEST_ASSERT_EQUAL_UINT32(1, p.diag().bit46Refreshes);
+    TEST_ASSERT_EQUAL_UINT32(1, p.diag().bit46Shots); // counters stay split
+    // The first 0x42 rides the next fresh carrier — after the refresh.
+    p.observeNative045(kNative045, 1060);
+    TEST_ASSERT_EQUAL(JitterAction::Stalk045, p.tick(1065, out));
+    TEST_ASSERT_EQUAL_UINT8(0x42, out[0]);
+    // A 1<->2 bounce after the consumed request: no second refresh (the
+    // next emission is just the pump continuing its 16-frame budget).
+    p.observeDasStatus(1, 1080);
+    p.observeDasStatus(2, 1090);
+    p.observeNative045(kNative045, 1100);
+    TEST_ASSERT_EQUAL(JitterAction::Stalk045, p.tick(1105, out));
+    TEST_ASSERT_EQUAL_UINT8(0x42, out[0]);
+    TEST_ASSERT_EQUAL_UINT32(1, p.diag().bit46Refreshes);
+}
+
+void test_v1192_refresh_skipped_without_fresh_template()
+{
+    // Fail-closed skip mirrors the arming one-shot: no fresh native 0x3EE
+    // template -> no refresh frame, but the 0x42 pump still runs.
+    DashJitterProcedure p;
+    arm(p);
+    p.observeNative045(kNative045, 1000);
+    reachDisengaging(p, 1010);
+    p.observeDasStatus(1, 1040);
+    p.observeDasStatus(2, 1050);
+    uint8_t out[8];
+    TEST_ASSERT_EQUAL(JitterAction::None, p.tick(1055, out));
+    TEST_ASSERT_EQUAL_UINT32(0, p.diag().bit46Refreshes);
+    p.observeNative045(kNative045, 1060);
+    TEST_ASSERT_EQUAL(JitterAction::Stalk045, p.tick(1065, out));
+    TEST_ASSERT_EQUAL_UINT8(0x42, out[0]);
+}
+
+void test_v1192_pending_refresh_dies_with_reset()
+{
+    // A queued refresh must not fire after the cycle dies: the deadline
+    // check runs before the emission blocks, and fullReset clears both
+    // one-shot queues.
+    DashJitterProcedure p;
+    arm(p);
+    p.observeNative3eeMux0(kNative045, 1000); // fresh template
+    p.observeNative045(kNative045, 1000);
+    reachDisengaging(p, 1010);
+    p.observeDasStatus(1, 1040);
+    p.observeDasStatus(2, 1050);
+    p.observeSteerAngle(120.0f, true, 1060); // >90 deg -> full reset
+    uint8_t out[8];
+    TEST_ASSERT_EQUAL(JitterAction::None, p.tick(1070, out));
+    TEST_ASSERT_EQUAL_UINT32(0, p.diag().bit46Refreshes);
+    TEST_ASSERT_EQUAL_UINT32(0, p.diag().bit46Shots);
+}
 
 void test_v1192_landing_split_fsd_vs_eap()
 {
@@ -762,8 +749,9 @@ void test_v1192_landing_split_fsd_vs_eap()
     TEST_ASSERT_EQUAL_UINT32(0, d.reengagedEap);
     TEST_ASSERT_EQUAL_STRING("reEngagedFsd", d.reason);
     uint8_t out[8];
-    TEST_ASSERT_EQUAL(JitterAction::None, p.tick(11050, out)); // timeout (10 s)
-    TEST_ASSERT_EQUAL_UINT8(0, p.diag().failedCycles);         // success billing
+    p.observeNative045(kNative045, 6100);
+    TEST_ASSERT_EQUAL(JitterAction::None, p.tick(6101, out)); // timeout
+    TEST_ASSERT_EQUAL_UINT8(0, p.diag().failedCycles);        // success billing
     // An EAP landing on the next cycle counts separately.
     p.observeDasStatus(1, 6200); // Idle -> Normal
     p.observeNative3eeMux0(kNative045, 6250);
@@ -778,151 +766,6 @@ void test_v1192_landing_split_fsd_vs_eap()
     TEST_ASSERT_EQUAL_STRING("reEngagedEap", d.reason);
     TEST_ASSERT_EQUAL_UINT32(2, d.requests);
     TEST_ASSERT_EQUAL_UINT32(2, d.cancels);
-}
-
-void test_v1194_no_refresh_clone_before_re_request()
-{
-    // v1.19.2 queued ONE bit46 refresh at the event-2 edge, emitted by
-    // tick() ahead of the pump's first 0x42 (2026-09-14 rationale: the
-    // arming shot's unlock latch does not survive our own cancel — ~70% of
-    // re-requests landed EAP). v1.19.4 RETIRES it: the beta16 field data
-    // traced the availability knocks to exactly these clone frames (shape
-    // self-contradictory, off-carrier), and LittleGong sends nothing
-    // between its cancel and re-request. Fresh 3ee template + stale 0x045
-    // carrier at the first post-edge tick: must be None, not Bit46Shot.
-    DashJitterProcedure p;
-    arm(p);
-    uint8_t tmpl[8] = {0x21, 0x22, 0x23, 0x24, 0x25, 0x00, 0x26, 0x27};
-    p.observeNative3eeMux0(tmpl, 900);
-    p.observeNative045(kNative045, 1000);
-    reachDisengaging(p, 1010);
-    uint8_t out[8];
-    TEST_ASSERT_EQUAL(JitterAction::Bit46Shot, p.tick(1015, out)); // arming one-shot (kept)
-    TEST_ASSERT_EQUAL_UINT32(1, p.diag().bit46Shots);
-    p.observeDasStatus(1, 1040);
-    p.observeDasStatus(2, 1050); // re-request queued — v1.19.2 refreshed here
-    TEST_ASSERT_EQUAL(JitterAction::None, p.tick(1055, out));
-    TEST_ASSERT_EQUAL_UINT32(1, p.diag().bit46Shots); // no second clone
-    // The first emission after the edge is the pump's 0x42 riding the next
-    // fresh carrier — not a clone.
-    p.observeNative045(kNative045, 1060);
-    TEST_ASSERT_EQUAL(JitterAction::Stalk045, p.tick(1065, out));
-    TEST_ASSERT_EQUAL_UINT8(0x42, out[0]);
-    // A 1<->2 bounce after the consumed request stays clone-free too.
-    p.observeDasStatus(1, 1080);
-    p.observeDasStatus(2, 1090);
-    p.observeNative045(kNative045, 1100);
-    p.observeNative3eeMux0(tmpl, 1100);
-    TEST_ASSERT_EQUAL(JitterAction::Stalk045, p.tick(1105, out));
-    TEST_ASSERT_EQUAL_UINT8(0x42, out[0]);
-    TEST_ASSERT_EQUAL_UINT32(1, p.diag().bit46Shots); // pinned all along
-}
-
-// ─── v1.19.3 widened wait + cap deletion (hold RETIRED in v1.19.4) ────
-
-void test_v1193_disengaging_window_10s_arming_5s()
-{
-    // Split deadlines (v1.19.3): Arming keeps the LittleGong 5 s; the
-    // Disengaging wait widens to 10 s — the measured vehicle response to
-    // the re-request runs 2.8..7.1 s, so the old shared 5 s cut late
-    // landings out of the accounting.
-    DashJitterProcedure p;
-    arm(p);
-    reachArming(p, 1000); // deadline 6010
-    uint8_t out[8];
-    TEST_ASSERT_EQUAL(JitterPhase::Arming, p.diag().phase);
-    TEST_ASSERT_EQUAL(JitterAction::None, p.tick(6010, out));
-    TEST_ASSERT_EQUAL(JitterPhase::Idle, p.diag().phase); // 5 s arming kept
-    TEST_ASSERT_EQUAL_STRING("timeout", p.diag().reason);
-
-    DashJitterProcedure q;
-    arm(q);
-    q.observeNative045(kNative045, 1000);
-    reachDisengaging(q, 1010); // deadline 1010+10000
-    q.observeDasStatus(1, 1040);
-    q.observeDasStatus(2, 1050);                              // deadline 1050+10000 = 11050
-    TEST_ASSERT_EQUAL(JitterAction::None, q.tick(9050, out)); // +8 s: alive
-    TEST_ASSERT_EQUAL(JitterPhase::Disengaging, q.diag().phase);
-    TEST_ASSERT_EQUAL(JitterAction::None, q.tick(11050, out)); // boundary
-    TEST_ASSERT_EQUAL(JitterPhase::Idle, q.diag().phase);
-    TEST_ASSERT_EQUAL_UINT32(1, q.diag().timeoutResets);
-}
-
-void test_v1193_session_cap_deleted_rearms_after_failure()
-{
-    // v1.19.1 stood down after ONE refused cycle (kSessionFailCap=1) — the
-    // 2026-09-15 field pass caught the machine spectating 3..4 unprotected
-    // captures because of it. v1.19.3: failedCycles_ is diagnostic only;
-    // every subsequent human engage is protected.
-    DashJitterProcedure p;
-    arm(p);
-    p.observeNative045(kNative045, 1000);
-    reachDisengaging(p, 1010);
-    p.observeDasStatus(1, 1040);
-    p.observeDasStatus(2, 1050); // the one re-request; the car refuses
-    uint8_t out[8];
-    TEST_ASSERT_EQUAL(JitterAction::None, p.tick(11050, out)); // 10 s expiry
-    TEST_ASSERT_EQUAL_UINT8(1, p.diag().failedCycles);         // billed (diag)
-    TEST_ASSERT_EQUAL(JitterPhase::Idle, p.diag().phase);
-    // The human engages AGAIN: protection re-arms immediately.
-    p.observeDasStatus(1, 12000); // Idle -> Normal
-    p.observeDasStatus(3, 12010);
-    TEST_ASSERT_EQUAL(JitterPhase::Arming, p.diag().phase);
-    TEST_ASSERT_EQUAL_STRING("arming", p.diag().reason);
-    // ...and after a SECOND refusal there is still no stand-down.
-    p.observeDasStatus(6, 12020);
-    TEST_ASSERT_EQUAL(JitterPhase::Disengaging, p.diag().phase);
-    p.observeDasStatus(1, 12030);
-    p.observeDasStatus(2, 12040);
-    TEST_ASSERT_EQUAL_UINT32(2, p.diag().requests);
-    TEST_ASSERT_EQUAL(JitterAction::None, p.tick(22050, out)); // second expiry
-    TEST_ASSERT_EQUAL_UINT8(2, p.diag().failedCycles);
-    p.observeDasStatus(1, 23000);
-    p.observeDasStatus(3, 23010);
-    TEST_ASSERT_EQUAL(JitterPhase::Arming, p.diag().phase); // protected again
-}
-
-void test_v1193_late_landing_counts_within_10s()
-{
-    // The measured response band runs to 7.1 s — beyond the old 5 s
-    // deadline. A landing at +7 s lands INSIDE the window: it counts as
-    // FSD success and the deadline expires with success billing (no
-    // failed cycle). v1.19.4: the window is also clone-free — v1.19.3
-    // pinned 34 hold frames across exactly this loop; tick() must return
-    // nothing but silence now (bit46 continuity is the base path's
-    // live-frame rewrite, fed by the ~1 Hz native mux0 carrier that
-    // observe keeps fresh, matching production wiring).
-    DashJitterProcedure p;
-    arm(p);
-    uint8_t tmpl[8] = {0, 0, 0, 0, 0, 0x01, 0, 0};
-    p.observeNative3eeMux0(tmpl, 1000);
-    p.observeNative045(kNative045, 1000);
-    reachDisengaging(p, 1010);
-    uint8_t out[8];
-    TEST_ASSERT_EQUAL(JitterAction::Bit46Shot, p.tick(1015, out)); // arming shot
-    p.observeDasStatus(1, 1040);
-    p.observeDasStatus(2, 1050);
-    uint32_t clones = 0;
-    for (uint32_t t = 1100; t <= 8000; t += 100)
-    {
-        if ((t % 1000) == 0)
-            p.observeNative3eeMux0(tmpl, t);
-        if (p.tick(t, out) == JitterAction::Bit46Shot)
-            ++clones;
-    }
-    TEST_ASSERT_EQUAL_UINT32(0, clones); // was 34 hold frames in v1.19.3
-    // Late landing at +7.05 s (the field's manual-stalk timings).
-    p.observeDasStatus(6, 8100);
-    TEST_ASSERT_EQUAL_STRING("reEngagedFsd", p.diag().reason);
-    TEST_ASSERT_EQUAL_UINT32(1, p.diag().reengagedFsd);
-    // Nothing until the deadline — the window stands itself down silently.
-    p.observeNative3eeMux0(tmpl, 8500);
-    TEST_ASSERT_EQUAL(JitterAction::None, p.tick(8600, out));
-    TEST_ASSERT_EQUAL_UINT32(1, p.diag().bit46Shots); // arming shot only
-    // Deadline 1050+10000 expires with success billing.
-    TEST_ASSERT_EQUAL(JitterAction::None, p.tick(11050, out));
-    TEST_ASSERT_EQUAL(JitterPhase::Idle, p.diag().phase);
-    TEST_ASSERT_EQUAL_UINT8(0, p.diag().failedCycles);
 }
 
 // ─── diag snapshot ────────────────────────────────────────────────────
@@ -985,10 +828,9 @@ int main()
     RUN_TEST(test_steer_over_90_full_reset);
     RUN_TEST(test_steer_ignored_without_procedure_or_invalid_type);
 
-    // v1.19.4 window carve-out + clone extinction
+    // Pause scope
     RUN_TEST(test_procedure_active_only_in_arming_and_disengaging);
-    RUN_TEST(test_in_disengaging_wait_window_scoped_accessor);
-    RUN_TEST(test_disengaging_window_emits_no_bit46_clones);
+    RUN_TEST(test_base_path_pause_survives_gate_close_during_procedure);
 
     // Reset semantics
     RUN_TEST(test_full_reset_clears_cycle_state_keeps_diag_counters);
@@ -999,14 +841,11 @@ int main()
     RUN_TEST(test_v1191_bounce_12_fires_one_request);
     RUN_TEST(test_v1191_park_midcycle_does_not_poison_next_session);
 
-    // v1.19.2 landing split + v1.19.4 refresh extinction
+    // v1.19.2 refresh + landing split
+    RUN_TEST(test_v1192_refresh_fires_before_re_request_pump);
+    RUN_TEST(test_v1192_refresh_skipped_without_fresh_template);
+    RUN_TEST(test_v1192_pending_refresh_dies_with_reset);
     RUN_TEST(test_v1192_landing_split_fsd_vs_eap);
-    RUN_TEST(test_v1194_no_refresh_clone_before_re_request);
-
-    // v1.19.3 widened wait + cap deletion (hold RETIRED in v1.19.4)
-    RUN_TEST(test_v1193_disengaging_window_10s_arming_5s);
-    RUN_TEST(test_v1193_session_cap_deleted_rearms_after_failure);
-    RUN_TEST(test_v1193_late_landing_counts_within_10s);
 
     // Diag
     RUN_TEST(test_diag_reflects_armed_state);

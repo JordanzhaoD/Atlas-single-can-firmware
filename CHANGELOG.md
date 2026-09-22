@@ -6,6 +6,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.20.1] - 2026-09-22
+
+JITTER core rollback to the v1.19.2 field-validated shape. Field report
+(2026-09-22): after upgrading to v1.20.0, FSD would not activate with the
+AP injection gate and the anti-jerk mechanism both enabled.
+
+### Fixed
+
+- Root cause: v1.19.3/v1.19.4 synced the dual-CAN beta16/beta17 JITTER
+  amendments into the single-CAN core, and v1.20.0 shipped on top of them.
+  Two deletions from that line broke FSD activation in the field:
+  - the pre-re-request bit46 refresh (v1.19.2's landing support — the
+    re-request moment went stale, so re-engagement landed EAP or was
+    ignored, matching the dual-CAN beta18 "bit46 gesture-freshness
+    classifier" evidence);
+  - the drive-session stand-down cap (one failed cycle used to stand the
+    machine down for the session; without it every stalk pull ran its own
+    cancel/re-request cycle, so no activation could survive).
+  The dual-CAN beta16..beta22 line was voided on 2026-09-20, but the
+  single-CAN v1.19.3/v1.19.4 commits were never rolled back with it.
+- Rollback scope (v1.19.2 behavior restored, all v1.20.0 UI/power changes
+  kept): pre-re-request bit46 refresh re-queued before the 0x42 pump,
+  5 s Disengaging deadline (the 10 s kDisengWaitMs widening gone), session
+  stand-down cap back, procedure-window base-path 0x3EE pause restored in
+  dashLegacyFsdActivationAllowed (the Disengaging-window carve-out gone),
+  and the jitterInhibit3ee device-write pause reinstalled on the Legacy
+  handler.
+- Diagnostics/UI back in step: `bit46Refreshes` counter restored in the
+  /status jitter object and the simulator mirror; the UI bit46 cell shows
+  shots/refreshes again and the sessionCap reason has its label back.
+
+### Changed
+
+- Nothing beyond the rollback surface; the v1.20.0 consolidation (UI,
+  power management, one-shot NVS cleanup) is untouched.
+
 ## [1.20.0] - 2026-09-20
 
 Port of the dual-CAN 5.0-beta01/beta02 UI consolidation and power-management

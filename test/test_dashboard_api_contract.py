@@ -2842,11 +2842,12 @@ class DashboardApiContractTests(unittest.TestCase):
     def test_jitter_procedure_is_wired_fail_closed(self) -> None:
         """The v1.19 JITTER 8.3.6 procedure (LittleGong-aligned) is wired end
         to end: switch persists and applies fail-closed, the pump/one-shot
-        emit from the CAN task, the Disengaging-window carve-out grants
-        bit46 continuity in-gate (v1.19.4 — the v1.19 base-path pause behind
-        the beta16/v1.19.3 landing regression is retired), 0x488 steering
-        abort is admitted, and the diag JSON follows the chain rule (source
-        + generated UI + simulator surfaces).
+        emit from the CAN task, the procedure-window base-path pause owns the
+        0x3EE channel (v1.19.2 shape — v1.20.1 rolled the v1.19.3/v1.19.4
+        dual-CAN beta16/17 sync back after the 2026-09-22 field regression:
+        FSD would not activate with the AP gate + anti-jerk on), 0x488
+        steering abort is admitted, and the diag JSON follows the chain rule
+        (source + generated UI + simulator surfaces).
         """
         module_src = (ROOT / "include" / "dash_jitter_procedure.h").read_text(
             encoding="utf-8"
@@ -2859,26 +2860,23 @@ class DashboardApiContractTests(unittest.TestCase):
             "static constexpr uint8_t kPumpMaxFrames = 16;",
             "static constexpr float kSteerAbortDeg = 45.0f;",
             "static constexpr float kSteerResetDeg = 90.0f;",
-            # v1.19.3 widened Disengaging wait (Arming keeps kDeadlineMs
-            # above) — kept through v1.19.4.
-            "static constexpr uint32_t kDisengWaitMs = 10000;",
         ):
             with self.subTest(constant=token):
                 self.assertIn(token, module_src)
-        # v1.19.3: the session cap is DELETED (in the field it stood the
-        # machine down and left subsequent captures unprotected; edge
-        # semantics + the cycles_<1 gate already bound the machine).
-        self.assertNotIn("kSessionFailCap", module_src)
-        self.assertNotIn('"sessionCap"', module_src)
-        # v1.19.4: the clone landing layer is gone for good — pacing
-        # constant, queue/hold state, and both diag counters (the 2026-09-16
-        # field pass traced the availability knocks to the ~44-frame/cycle
-        # self-contradictory clone dose). The arming one-shot
-        # (bit46Queued_/bit46Shots) is the only synthetic 0x3EE left.
-        for dead in ("kHoldGapMs", "bit46RefreshQueued_", "holdActive_", "lastHoldTxMs_"):
+        # v1.20.1: the v1.19.3 kDisengWaitMs widening is rolled back with
+        # the core (v1.19.2 keeps the single 5 s deadline) and the session
+        # cap is back — one failed cycle stands the machine down for the
+        # drive session, Park or a toggle re-opens the budget.
+        self.assertNotIn("kDisengWaitMs", module_src)
+        self.assertIn("static constexpr uint8_t kSessionFailCap = 1;", module_src)
+        self.assertIn('"sessionCap"', module_src)
+        # v1.20.1: the v1.19.2 pre-re-request bit46 refresh is restored (the
+        # v1.19.4 deletion shipped in v1.20.0 and failed in the field); the
+        # v1.19.3 window-hold layer stays dead — it never existed on the
+        # v1.19.2 line this core is rolled back to.
+        self.assertIn("bit46RefreshQueued_", module_src)
+        for dead in ("kHoldGapMs", "holdActive_", "lastHoldTxMs_", "bit46Holds"):
             self.assertNotIn(dead, module_src)
-        for dead_counter in ("bit46Refreshes", "bit46Holds"):
-            self.assertNotIn(dead_counter, module_src)
         # v1.19.2 FSD/EAP landing split (field data showed ~30% FSD
         # landings; v1.19.1 counted both states as one success) — kept.
         self.assertIn("++reengagedFsd_;", module_src)
@@ -2896,15 +2894,13 @@ class DashboardApiContractTests(unittest.TestCase):
         )
         # The single production configure() call passes the live gate.
         self.assertIn("apInjectionGate);", self.dash)
-        # v1.19.4 window carve-out, double-pinned on the FUNCTION BODY
-        # (procedureActive() survives legally in the wheel-DND arbitration
-        # and the permit cascade — a global assertion would misfire):
-        #   extinction: the v1.19 pause (procedureActive() early-false) is
-        #     gone from dashLegacyFsdActivationAllowed — the beta16/v1.19.3
-        #     landing regression traced to it;
-        #   positive: inDisengagingWait() grants the carve-out AFTER the
-        #     fail-closed canActive/OTA/handler trio and BEFORE the
-        #     gate-off early-true.
+        # v1.20.1: the v1.19.2 procedure-window pause is back, double-pinned
+        # on the FUNCTION BODY (inDisengagingWait() must not return anywhere
+        # — the v1.19.4 carve-out variant shipped in v1.20.0 failed in the
+        # field): procedureActive() pauses base bit46 AFTER the fail-closed
+        # canActive/OTA/handler trio and BEFORE the gate-off early-true, so
+        # a closed gate with a running procedure still pauses (fail-closed
+        # ordering).
         fn = re.search(
             r"static bool dashLegacyFsdActivationAllowed\(uint32_t nowMs\)\s*\{.*?^\}",
             self.dash,
@@ -2912,37 +2908,35 @@ class DashboardApiContractTests(unittest.TestCase):
         )
         self.assertIsNotNone(fn)
         fn_body = fn.group(0)
+        self.assertIn("dashJitterCtrl.procedureActive()", fn_body)
         self.assertNotIn(
-            "dashJitterCtrl.procedureActive()",
+            "inDisengagingWait",
             fn_body,
-            "the v1.19 base-path pause must not return inside the gate",
+            "the v1.19.4 carve-out must not return inside the gate",
         )
-        carve = fn_body.index("dashJitterCtrl.inDisengagingWait()")
+        pause = fn_body.index("dashJitterCtrl.procedureActive()")
         self.assertLess(
             fn_body.index("if (!dashOtaGuardAllowInjection())"),
-            carve,
-            "carve-out must stay behind the fail-closed canActive/OTA pair",
+            pause,
+            "pause must stay behind the fail-closed canActive/OTA pair",
         )
         self.assertLess(
-            carve,
+            pause,
             fn_body.index("if (!apInjectionGate)"),
-            "carve-out must sit before the gate-off early-true",
+            "pause must sit before the gate-off early-true",
         )
-        # The v1.19 inhibit wrapper (device 0x3EE write pause) is deleted
-        # everywhere it was ever installed; only the observe template feed
-        # survives (the arming one-shot still needs its cache).
-        for surface in (self.dash, self.handlers, self.main):
-            self.assertNotIn("jitterInhibit3ee", surface)
+        # The v1.19 inhibit wrapper (device 0x3EE write pause while the
+        # procedure runs) is installed on the handler again; the observe
+        # template feed never left (the arming one-shot needs its cache).
+        self.assertIn("static bool dashJitterInhibit3ee()", self.dash)
+        self.assertIn("dashHandler->jitterInhibit3ee = dashJitterInhibit3ee;", self.dash)
         self.assertIn(
             "void (*jitterObserve3ee)(const uint8_t data[8], uint8_t bus, uint32_t nowMs)",
             self.handlers,
         )
         self.assertIn("jitterObserve3ee(frame.data, frame.bus, nowMs);", self.handlers)
-        # Module side: the accessor IS the window predicate, nothing looser.
-        self.assertIn(
-            "bool inDisengagingWait() const { return phase_ == JitterPhase::Disengaging; }",
-            module_src,
-        )
+        # Module side: the v1.19.4 accessor is gone with the carve-out.
+        self.assertNotIn("inDisengagingWait", module_src)
         # 0x488 + 0x3C2 admission in all three handler filter tables (13 ids).
         for count_pin in ("return 13;",):
             self.assertEqual(self.handlers.count(count_pin), 3)
@@ -2965,6 +2959,7 @@ class DashboardApiContractTests(unittest.TestCase):
             ',"effective":', ',"apGateOpen":', ',"permit":', ',"apState":',
             ',"cycles":', ',"cancels":', ',"requests":',
             ',"reengagedFsd":', ',"reengagedEap":', ',"bit46Shots":',
+            ',"bit46Refreshes":',
             ',"pumpFrames":', ',"txOk":', ',"txFail":', ',"steerAborts":',
             ',"steerResets":', ',"apErrorResets":', ',"timeoutResets":',
             ',"failedCycles":',
@@ -2975,7 +2970,7 @@ class DashboardApiContractTests(unittest.TestCase):
         for stray in (
             '","effective":', '","apGateOpen":', '","permit":', '","cycles":',
             '","cancels":', '","requests":', '","reengagedFsd":',
-            '","reengagedEap":', '","pumpFrames":',
+            '","reengagedEap":', '","bit46Refreshes":', '","pumpFrames":',
             '","txOk":', '","txFail":', '","steerAborts":', '","timeoutResets":',
         ):
             with self.subTest(chain_stray=stray):
@@ -2991,15 +2986,16 @@ class DashboardApiContractTests(unittest.TestCase):
             self.assertIn("jtReasonMap", surface)
             self.assertIn("AP 门控未开启", surface)
             # v1.19.3 field-verified badge (single-car sample) survives;
-            # v1.19.4: the refresh/hold counters died with their clones —
-            # the bit46 cell is single-value again, stale mirror tokens on
-            # either surface would render dead numbers.
+            # v1.20.1: the bit46 cell shows shots/refreshes again (restored
+            # with the v1.19.2 core rollback) and the sessionCap reason has
+            # its label back — stale single-value tokens on either surface
+            # would render dead numbers.
             self.assertIn("实车验证防甩 · 单车样本", surface)
-            self.assertNotIn("bit46Refreshes", surface)
+            self.assertIn("bit46Refreshes", surface)
+            self.assertIn("sessionCap", surface)
             self.assertNotIn("bit46Holds", surface)
-            self.assertNotIn("sessionCap", surface)
             self.assertIn("jitter:jtTgl&&jtTgl.checked?'1':'0'", surface)
-        self.assertIn("bit46 单发", self.ui)
+        self.assertIn("bit46 / 刷新", self.ui)
         self.assertIn('id="def-jitter-tgl"', self.ui)
         # Simulator mirrors the firmware /status shape (beta07 lesson).
         for token in (
@@ -3009,6 +3005,7 @@ class DashboardApiContractTests(unittest.TestCase):
             '"reason": "apGateOff" if self.jitter else "off",',
             '"reengagedFsd": 0,',
             '"reengagedEap": 0,',
+            '"bit46Refreshes": 0,',
             '"failedCycles": 0,',
             '"jitter": STATE.jitter,',
             'STATE.jitter = self.form_bool(form["jitter"])',
@@ -3065,7 +3062,7 @@ class DashboardApiContractTests(unittest.TestCase):
         version = self.version.strip()
         # Hard version pin (dual-CAN contract convention): an accidental
         # VERSION bump without the full release pass must fail loudly here.
-        self.assertEqual("1.20.0", version)
+        self.assertEqual("1.20.1", version)
         # VERSION accepts the project's two-part release form (1.10) and the
         # existing three-part form used by older releases.
         self.assertRegex(version, r"^\d+\.\d+(?:\.\d+)?$", f"VERSION file malformed: {version!r}")

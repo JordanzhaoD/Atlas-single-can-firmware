@@ -255,14 +255,13 @@ struct CarManagerBase
     bool (*checkEvd)() = nullptr;
     FsdGateBlockReason (*gateBlockReason)() = nullptr;
     bool (*legacyFsdActivationAllowed)(uint32_t nowMs) = nullptr;
-    // v1.19 JITTER hook (see dash_jitter_procedure.h). The observe wrapper
+    // v1.19 JITTER hooks (see dash_jitter_procedure.h). The observe wrapper
     // is fed from the Legacy mux0 branch with the full native frame BEFORE
     // any gate decision — the procedure caches its own one-shot template
-    // (byte5 |= 0x43 clone) from it. (v1.19.4: the inhibit wrapper that
-    // paused device 0x3EE writes during a procedure is deleted — the base
-    // rewrite runs continuously; the Disengaging-window gate carve-out
-    // lives in dashLegacyFsdActivationAllowed.)
+    // (byte5 |= 0x43 clone) from it; the inhibit wrapper pauses every device
+    // 0x3EE write while the procedure runs.
     void (*jitterObserve3ee)(const uint8_t data[8], uint8_t bus, uint32_t nowMs) = nullptr;
+    bool (*jitterInhibit3ee)() = nullptr;
     // When set and returns true, an installed plugin owns the FSD activation
     // frames (1006/1021/2047) and the built-in handler must suppress its own
     // injection to avoid duplicate frames. Defaults to nullptr so the built-in
@@ -969,6 +968,18 @@ struct LegacyHandler : public CarManagerBase
                                                : DashAbortGuardBlockPath::LegacyFsdMux0);
                     return;
                 }
+                // v1.19 JITTER pause (replaces the v1.18 barrier A): while the
+                // procedure runs, ALL device 0x3EE mux0 writes stop — the
+                // one-shot owns bit46. The vehicle's own frame passes untouched.
+                if (jitterInhibit3ee && jitterInhibit3ee())
+                {
+                    legacyFsdDiag.mux0.lastSkip = FsdSkipReason::GateBlocked;
+                    legacyFsdDiag.health = FsdHealthState::GateBlocked;
+                    legacyFsdDiag.lastBlockedBy = FsdGateBlockReason::LegacyFsdSettle;
+                    if (speedOffsetRequested)
+                        legacySpeedDiag.blockedReason = "jitterProcedure";
+                    return;
+                }
                 bool activationAllowed = false;
                 if ((bool)fsdTriggered)
                 {
@@ -1092,6 +1103,14 @@ struct LegacyHandler : public CarManagerBase
                     legacyFsdDiag.health = FsdHealthState::GateBlocked;
                     legacyFsdDiag.lastBlockedBy = FsdGateBlockReason::ApGate;
                     abortGuard.recordBlock(DashAbortGuardBlockPath::LegacyFsdMux1);
+                    return;
+                }
+                // The JITTER pause covers mux1 device writes too (see the mux0 branch).
+                if (jitterInhibit3ee && jitterInhibit3ee())
+                {
+                    legacyFsdDiag.mux1.lastSkip = FsdSkipReason::GateBlocked;
+                    legacyFsdDiag.health = FsdHealthState::GateBlocked;
+                    legacyFsdDiag.lastBlockedBy = FsdGateBlockReason::LegacyFsdSettle;
                     return;
                 }
                 if (!injectionAllowed())

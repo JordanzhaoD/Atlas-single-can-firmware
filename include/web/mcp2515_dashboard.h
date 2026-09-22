@@ -1008,10 +1008,13 @@ static bool dashCheckADEnabled()
     if (!canActive || !dashOtaGuardAllowInjection())
         return false;
     // v1.18: with the Legacy handler active the Legacy FSD gate chain owns
-    // admission (the 8.3.6 JITTER Disengaging-window carve-out included —
-    // v1.19.4). The plain dashApInjectionAllowed() below requires
-    // APActive(3..6), which would veto the procedure's mid-handshake
-    // state-2 window. Other handlers keep the plain AP gate.
+    // admission (the 8.3.6 JITTER pause included — v1.19). The plain
+    // dashApInjectionAllowed() below requires APActive(3..6), which would
+    // veto the procedure's mid-handshake state-2 window. Other handlers keep
+    // the plain AP gate.
+    // v1.20.1: the v1.19.4 Disengaging-window carve-out variant was rolled
+    // back with the whole v1.19.3/v1.19.4 JITTER core (2026-09-22 field
+    // regression — FSD would not activate with the gate + anti-jerk on).
     return dashLegacyHandlerActive() ? dashLegacyFsdActivationAllowed(millis())
                                      : dashApInjectionAllowed();
 }
@@ -1036,12 +1039,15 @@ static bool dashLegacyApInjectionAllowed()
 // defense chain (DashApFirstGate debounce, Instant/Minimal Inject, Soft Engage,
 // the configurable AP-settle delay) was removed — none of it stopped the
 // 2026.8.3.6 activation jerk. v1.19: the LittleGong-aligned JITTER procedure
-// replaces the v1.18 coordinator. v1.19.4: the procedure-window base-path
-// pause is deleted (the v1.19 regression — its "LittleGong mutex" comment
-// was a misread; the reverse-engineered firmware runs the JITTER machine and
-// the continuous g_can_send_frame_0x3EE base writer side by side). The base
-// rewrite runs continuously; a Disengaging-window carve-out below carries
-// bit46 through the mid-handshake states the plain AP gate would veto.
+// replaces the v1.18 coordinator; while a procedure actually runs (ARMING or
+// DISENGAGING) the base bit46 path is paused — the procedure owns the 0x3EE
+// channel, exactly the LittleGong base-injection mutex. When nothing runs,
+// the direct path serves non-8.3.6 vehicles exactly as before.
+// v1.20.1: this is the v1.19.2 shape, restored. The v1.19.3/v1.19.4 variant
+// (continuous base rewrite + Disengaging-window carve-out, synced from the
+// dual-CAN beta16/beta17 line) shipped in v1.20.0 and failed in the field:
+// with the AP gate + anti-jerk both on, FSD would not activate. The v1.19.2
+// core is the last single-CAN field-validated combination (2026-09-14 pass).
 static bool dashLegacyFsdActivationAllowed(uint32_t nowMs)
 {
     if (!canActive)
@@ -1062,22 +1068,16 @@ static bool dashLegacyFsdActivationAllowed(uint32_t nowMs)
         legacyFsdLastBlockedMs = nowMs;
         return false;
     }
-    // v1.19.4 JITTER window carve-out: during the Disengaging wait the
-    // vehicle sits at 0x399 state 1/2 — APActive is false, so the plain AP
-    // gate below would veto bit46 exactly when the 0x42 re-request needs
-    // the unlock latch held (the v1.19 pause that used to sit here never
-    // exposed this: it blocked everything first). The base-path live-frame
-    // rewrite keeps bit46 on the carrier through the whole window — the
-    // beta13 qualification-window mechanism LittleGong's continuous core
-    // injection mirrors (its firmware shows the JITTER machine and the
-    // g_can_send_frame_0x3EE base writer coexisting, no mutex). Arming
-    // needs no carve-out: the car is engaged (3..6) and passes the plain
-    // gate. Still fail-closed: canActive / OTA / handler above remain
-    // ahead of this branch.
-    if (dashJitterCtrl.inDisengagingWait())
+    // v1.19 JITTER pause: while the procedure runs, every base bit46 write
+    // stops (LittleGong's jitter_state != 0 mutex). This single check
+    // replaces the v1.18 sole-authority branch AND the mux0 Barrier A; it
+    // must sit BEFORE the gate-off early-true below so a closed gate with a
+    // running procedure still pauses (fail-closed ordering).
+    if (dashJitterCtrl.procedureActive())
     {
-        legacyFsdLastAllowed = true;
-        return true;
+        legacyFsdLastAllowed = false;
+        legacyFsdLastBlockedMs = nowMs;
+        return false;
     }
     if (!apInjectionGate)
     {
@@ -1091,12 +1091,11 @@ static bool dashLegacyFsdActivationAllowed(uint32_t nowMs)
         return false;
     }
     // v1.18: the configurable AP-settle delay was removed with the #108
-    // defense family — a pre-coordinator anti-jerk measure. With the gate
+    // defense family — a pre-coordinator anti-jerk measure. v1.19: the
+    // JITTER pause branch above owns the procedure window; with the gate
     // open and nothing running, admission is immediate once 0x399 confirms
     // AP active — the gate's fail-closed bootstrap rule (no bit46 before AP
-    // is seen active) is unchanged (the Disengaging-window carve-out above
-    // is the one deliberate exception — mid-handshake only, never the
-    // first engagement).
+    // is seen active) is unchanged.
     legacyFsdLastAllowed = true;
     return true;
 }
@@ -1485,16 +1484,22 @@ static void dashApplySpeedProfileState()
 }
 
 // HW3 mux-2 codec + slew limiter live in include/dash_hw3_speed.h so they
-// v1.19 JITTER hook installed on the Legacy handler. The observe wrapper
+// v1.19 JITTER hooks installed on the Legacy handler. The observe wrapper
 // feeds the procedure's 0x3EE mux0 native-template cache from the real mux0
-// branch (raw bytes before any gate decision — the one-shot clones from it).
-// (v1.19.4: the inhibit wrapper that paused device 0x3EE writes during a
-// procedure is deleted — the beta16 regression traced to exactly that
-// pause; the base rewrite now runs continuously, and the Disengaging-window
-// gate carve-out lives in dashLegacyFsdActivationAllowed.)
+// branch (raw bytes before any gate decision — the one-shot clones from it);
+// the inhibit wrapper pauses mux1 device writes while a procedure runs (the
+// mux0 pause lives in dashLegacyFsdActivationAllowed).
+// v1.20.1: restored to the v1.19.2 shape together with the whole JITTER
+// core rollback (the v1.19.4 deletion of the inhibit wrapper shipped in
+// v1.20.0 and failed in the field — see dashLegacyFsdActivationAllowed).
 static void dashJitterObserve3ee(const uint8_t data[8], uint8_t, uint32_t nowMs)
 {
     dashJitterCtrl.observeNative3eeMux0(data, nowMs);
+}
+
+static bool dashJitterInhibit3ee()
+{
+    return dashJitterCtrl.procedureActive();
 }
 
 // can be shared between HW3Handler (in handlers.h, parsed first) and the
@@ -1520,6 +1525,7 @@ static void dashApplyRuntimeState()
         dashHandler->legacyFsdActivationAllowed = dashLegacyFsdActivationAllowed;
         dashHandler->pluginOwnsFsdActivation = dashPluginOwnsFsdActivation;
         dashHandler->jitterObserve3ee = dashJitterObserve3ee;
+        dashHandler->jitterInhibit3ee = dashJitterInhibit3ee;
         dashHandler->checkNag = dashCheckNagDisabled;
         // Legacy uses one vehicle-evidence-driven path for every migrated
         // non-zero selection: fresh 0x399 HOS triggers cadence-aware late
@@ -2616,9 +2622,13 @@ static void appendJitterDiagJson(String &j)
     j += jt.reengagedEap;
     j += R"JSON(,"bit46Shots":)JSON";
     j += jt.bit46Shots;
-    // v1.19.4: the refresh/hold counters are retired with the clones they
-    // billed (bit46Shots is the only synthetic 0x3EE count left; in-window
-    // continuity is the base-path rewrite, not observable here).
+    // v1.19.2 pre-re-request refresh frames (distinct from arming shots so
+    // a field session can verify refreshes ~= requests directly).
+    // v1.20.1: restored with the JITTER core rollback — v1.19.4 had retired
+    // the counter along with the refresh it billed; the refresh itself is
+    // the field-proven landing support (see dash_jitter_procedure.h).
+    j += R"JSON(,"bit46Refreshes":)JSON";
+    j += jt.bit46Refreshes;
     j += R"JSON(,"pumpFrames":)JSON";
     j += jt.pumpFrames;
     j += R"JSON(,"txOk":)JSON";
