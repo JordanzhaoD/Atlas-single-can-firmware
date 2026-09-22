@@ -17,6 +17,7 @@
 #include "dash_reactive_hold_nag.h"
 #include "dash_nag_diag.h"
 #include "dash_legacy_370_echo.h"
+#include "dash_legacy_stalk_nag.h"
 #include "dash_epas_late_echo.h"
 #include "dash_fsd_diag.h"
 
@@ -173,6 +174,13 @@ struct CarManagerBase
     Shared<bool> isaChimeSuppress{false};
     Shared<bool> isaOverride{false};    // spec Task 3: HW4 重写限速 5b (0x39B raw=31 NONE)
     Shared<bool> bionicSteering{false}; // Phase 3: bionic steering mode
+    // Legacy-only 0x045 one-shot Resume NAG.  Kept separate from the old
+    // 0x370 algorithms so selecting it cannot run both transmitters.
+    Shared<bool> legacyStalkNagEnabled{false};
+    // Mirror of the dashboard TU's OTA-guard flag (its own static lives in
+    // dash_ota_guard.h, unreachable here without a second, detached copy).
+    // Refreshed by mcpDashOnFrame on every bus frame — same task, same data.
+    Shared<bool> vehicleOtaBlocked{false};
     Shared<uint8_t> hw4OffsetRaw{0};
     Shared<bool> banShieldEnable{false};
     Shared<uint32_t> banShieldBlocks{0};
@@ -431,6 +439,7 @@ struct CarManagerBase
     {
         return {};
     }
+    virtual DashLegacyStalkNagDiag legacyStalkNagDiag() const { return {}; }
     virtual DashReactiveDiag nagDiagForMode(DashNagMode /*mode*/) const
     {
         return dashMakeDisabledNagDiag();
@@ -456,6 +465,7 @@ struct LegacyHandler : public CarManagerBase
     DashReactiveNagBurst nag; // TSL6P replay burst state machine
     DashReactiveHoldNag reactiveHoldNag;
     DashEpasLateEcho lateNag;
+    DashLegacyStalkNag stalkNag;
     DashNagMode nagMode{DashNagMode::Off};
     uint8_t lastNagApState{0};
     uint8_t lastNagHos{0};
@@ -578,6 +588,7 @@ struct LegacyHandler : public CarManagerBase
         nag.init(actualSeed);
         reactiveHoldNag.init(actualSeed);
         lateNag = DashEpasLateEcho{};
+        stalkNag.resetRuntime();
         refreshLateNagEnabled();
     }
 
@@ -585,6 +596,10 @@ struct LegacyHandler : public CarManagerBase
     DashEpasLateEchoDiag lateEchoRuntimeDiag(uint32_t nowMs) const override
     {
         return lateNag.diag(nowMs);
+    }
+    DashLegacyStalkNagDiag legacyStalkNagDiag() const override
+    {
+        return stalkNag.diag();
     }
 
     DashReactiveDiag nagDiagForMode(DashNagMode mode) const override
@@ -715,6 +730,7 @@ struct LegacyHandler : public CarManagerBase
 
     void handleMessage(CanFrame &frame, CanDriver &driver) override
     {
+        stalkNag.setEnabled((bool)legacyStalkNagEnabled);
         if (onFrame)
             onFrame(frame);
         updateHwDetectedFrom920(frame);
@@ -798,6 +814,19 @@ struct LegacyHandler : public CarManagerBase
         // byte[1]: 0x00=Pos1, 0x21=Pos2, 0x42=Pos3, 0x64=Pos4, 0x85=Pos5, 0xA6=Pos6, 0xC8=Pos7
         if (frame.id == 69)
         {
+            // Outer permit mirrors the JITTER tick (OTA guard + abort guard
+            // veto at TX). The abort guard is only consulted — and only
+            // records a block — when the module actually has work pending,
+            // so an idle bus does not inflate its block counters. The AP
+            // injection gate is deliberately absent: the resume fires on
+            // the AP 6->1 warning drop, an AP-inactive moment by definition.
+            const bool stalkAbortOk = !stalkNag.hasPendingAction() ||
+                                      abortGuardAllowsInjection(DashAbortGuardBlockPath::Nag);
+            const DashLegacyStalkNagTxResult result =
+                stalkNag.onStalkFrame(frame, driver, dashDiagNowMs(),
+                                      !vehicleOtaBlocked && stalkAbortOk);
+            if (result == DashLegacyStalkNagTxResult::Sent)
+                framesSent++;
             if (frame.dlc < 2)
                 return;
             if (!speedProfileAuto)
@@ -866,6 +895,11 @@ struct LegacyHandler : public CarManagerBase
             if (frame.dlc < 1)
                 return;
             uint8_t apState = readDASAutopilotStatus(frame);
+            if (frame.dlc >= 6)
+            {
+                const uint8_t handsOnState = readDASAutopilotHandsOnState(frame);
+                stalkNag.onDasStatus(apState, handsOnState, dashDiagNowMs());
+            }
             if (isPrimaryDasFrame(frame))
             {
                 const uint32_t apNowMs = dashDiagNowMs();

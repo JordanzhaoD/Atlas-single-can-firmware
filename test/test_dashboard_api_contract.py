@@ -11,6 +11,7 @@ DASH = ROOT / "include" / "web" / "mcp2515_dashboard.h"
 HANDLERS = ROOT / "include" / "handlers.h"
 CAN_HELPERS = ROOT / "include" / "can_helpers.h"
 ABORT_GUARD = ROOT / "include" / "dash_abort_guard.h"
+STALK_NAG = ROOT / "include" / "dash_legacy_stalk_nag.h"
 LEGACY_SPEED = ROOT / "include" / "dash_legacy_speed.h"
 MAIN = ROOT / "src" / "main.cpp"
 VERSION = ROOT / "VERSION"
@@ -34,6 +35,7 @@ class DashboardApiContractTests(unittest.TestCase):
         cls.handlers = HANDLERS.read_text(encoding="utf-8")
         cls.can_helpers = CAN_HELPERS.read_text(encoding="utf-8")
         cls.abort_guard = ABORT_GUARD.read_text(encoding="utf-8")
+        cls.stalk_nag = STALK_NAG.read_text(encoding="utf-8")
         cls.legacy_speed = LEGACY_SPEED.read_text(encoding="utf-8")
         cls.main = MAIN.read_text(encoding="utf-8")
         cls.version = VERSION.read_text(encoding="utf-8")
@@ -390,6 +392,7 @@ class DashboardApiContractTests(unittest.TestCase):
         self.assertIn('hw3UpstreamNag ? dashNagMode', self.dash)
         self.assertIn('dashNagHandler.handleMessageAt(', self.dash)
         self.assertIn('routeBlock == DashNagRouteBlock::None', self.dash)
+        self.assertIn('dashHandler->legacyStalkNagEnabled = canActive && legacyStalkNag', self.dash)
         self.assertIn('dashHandler->bionicSteering = legacyLateHumanReplay', self.dash)
         self.assertIn('DashNagMode::EpasLateEcho', self.dash)
         self.assertIn('reactive && reactive != dashHandler', self.dash)
@@ -2009,6 +2012,8 @@ class DashboardApiContractTests(unittest.TestCase):
         self.assertIsNotNone(runtime)
         runtime_body = runtime.group(0)
         for token in [
+            "dashHandler->legacyStalkNagEnabled = canActive && legacyStalkNag",
+            "dashHandler->vehicleOtaBlocked = vehicleOtaActive",
             "dashHandler->bionicSteering = legacyLateHumanReplay",
             "dashHandler->isaChimeSuppress = nvsIsaChimeSuppress",
             "dashHandler->banShieldEnable = nvsBanShieldEnable",
@@ -2023,6 +2028,30 @@ class DashboardApiContractTests(unittest.TestCase):
         self.assertIn("handlerPool[i]->bionicSteering = dashBionicSteering", nvs_body)
         self.assertIn("handlerPool[i]->banShieldEnable = nvsBanShieldEnable", nvs_body)
         self.assertIn("dashApplyNvsRuntimeSwitches();\n    dashSwapHandler(hwMode);", self.dash)
+
+    def test_legacy_stalk_nag_tx_is_gated_by_ota_and_abort_guard(self) -> None:
+        """Legacy 0x045 stalk resume must be vetoed at TX by the OTA guard and
+        the abort guard (the JITTER permit family) — but never by the AP
+        injection gate, which would veto every press by definition (the
+        trigger is the AP 6->1 warning drop, an AP-inactive moment)."""
+        # The TX call site passes the outer-gate verdict into the module.
+        self.assertIn("stalkNag.onStalkFrame(frame, driver, dashDiagNowMs(),", self.handlers)
+        self.assertIn("!vehicleOtaBlocked && stalkAbortOk", self.handlers)
+        # The abort guard is only consulted when work is actually pending, so
+        # idle-bus 0x045 traffic cannot inflate its block counters.
+        self.assertIn("stalkNag.hasPendingAction()", self.handlers)
+        # The OTA flag is mirrored per-frame into the handler (same task).
+        self.assertIn("dashHandler->vehicleOtaBlocked = vehicleOtaActive", self.dash)
+        # The module drops — never defers — a pending action while gated.
+        self.assertIn("++blockedOuterGate_", self.stalk_nag)
+        # Diag surface reports the outer-gate block counter. The C++ source
+        # emits JSON with escaped quotes (j += ",\"stalkBlockedOuterGate\":")
+        # so the Python pin must match the escaped form.
+        self.assertIn(',\\"stalkBlockedOuterGate\\":', self.dash)
+        # 0x045 integrity byte is CRC8-J1850 (jitter_045 field format), not
+        # the additive vehicle checksum used by 0x370/0x3EE.
+        self.assertIn("jitter_045::crc8J1850(frame.data, 7) == frame.data[7]", self.stalk_nag)
+        self.assertIn("out.data[7] = jitter_045::crc8J1850(out.data, 7);", self.stalk_nag)
 
     def test_phase3_defense_config_exposes_dnd_params(self) -> None:
         """defense_config must accept and return dnd_volume and dnd_speed."""
@@ -2045,25 +2074,28 @@ class DashboardApiContractTests(unittest.TestCase):
         self.assertIn("bionicDisabled()", body)
         self.assertIn("dashBionicDisabled", body)
 
-    def test_phase3_defense_ui_has_6_toggles(self) -> None:
+    def test_phase3_defense_ui_has_7_toggles(self) -> None:
         """Defense page keeps non-NAG toggles; NAG is selected directly.
 
         (Was 8; the EPAS-nag toggle ``def-epnag-tgl`` was intentionally removed
-        in the nag-injection safety takedown — see ``test_no_epas_nag_contract``
-        for the guard that keeps it gone.)
+        in the nag-injection safety takedown. v1.20.10 adds the dedicated
+        0x045 stalk switch ``def-stalk-nag-tgl`` so the Legacy path no longer
+        rides on the mode selector — see
+        ``test_stalk_nag_switch_and_slew_decoupling_contract``.)
         """
         defense_page = re.search(r'id="pg-defense".*?id="pg-ota"', self.ui, re.S)
         self.assertIsNotNone(defense_page)
         body = defense_page.group(0)
         toggles = [
             'id="hw3-slew-tgl"',
+            'id="def-stalk-nag-tgl"',
             'id="def-sound-tgl"',
             'id="def-dnd-vol-tgl"',
             'id="def-speed-nd-tgl"',
             'id="def-dnd-spd-tgl"',
             'id="def-apeap-tgl"',
         ]
-        self.assertEqual(len(toggles), 6)
+        self.assertEqual(len(toggles), 7)
         for tid in toggles:
             with self.subTest(toggle=tid):
                 self.assertIn(tid, body)
@@ -2071,8 +2103,8 @@ class DashboardApiContractTests(unittest.TestCase):
         self.assertNotIn('id="def-epnag-tgl"', body)
 
     def test_phase3_defense_ui_explains_independent_nag(self) -> None:
-        self.assertIn("Legacy 使用实车 Late Human Replay", self.ui)
-        self.assertIn("最终 TX 仍受 CAN、启动、OTA、AP Gate 与 Abort Guard 约束", self.ui)
+        self.assertIn("Legacy 使用已验证的 0x045 单次 Resume 拨杆", self.ui)
+        self.assertIn("检测到 AP 6→1 且 Hands=3", self.ui)
         self.assertNotIn('id="def-bionic-tgl"', self.ui)
 
     def test_phase3_defense_js_saves_dnd_params(self) -> None:
@@ -3013,6 +3045,81 @@ class DashboardApiContractTests(unittest.TestCase):
             with self.subTest(simulator=token):
                 self.assertIn(token, self.simulator)
 
+    def test_stalk_nag_switch_and_slew_decoupling_contract(self) -> None:
+        """v1.20.10 defense-page wiring: the Legacy 0x045 stalk NAG gets its
+        own switch (mode selector restored to v1.20.0 semantics), the HW3
+        slew limit is decoupled from the defense master, the AP gate /
+        auto-restore switches move directly under the master switch, and the
+        two long safety strips are deleted."""
+        # ── Backend: dedicated stalk_nag arg (own POST key, own NVS truth) ──
+        defense = re.search(r"static void handleDefenseConfig\(\).*?server\.send\(200", self.dash, re.S)
+        self.assertIsNotNone(defense)
+        body = defense.group(0)
+        self.assertIn('server.hasArg("stalk_nag")', body)
+        self.assertIn('server.hasArg("hw3_slew")', body)
+        # The forced coupling is gone: master must no longer overwrite the
+        # slew runtime (comment-stripped so the tombstone cannot satisfy it).
+        dash_code = "\n".join(line.split("//", 1)[0] for line in self.dash.splitlines())
+        self.assertNotIn("hw3OffsetSlew = dashDefenseEnabled", dash_code)
+        # NVS persistence + runtime apply for the stalk switch.
+        self.assertIn('prefs.putBool("stalk_nag", dashLegacyStalkNagSwitch);', self.dash)
+        self.assertIn('prefs.getBool("stalk_nag", false)', self.dash)
+        # Mode selector restored: Legacy yields to the stalk switch so only
+        # one NAG transmitter is ever live.
+        self.assertIn("nagSelected && !legacyStalkNag", self.dash)
+        # The defense_config GET emits both new flat keys (escaped form).
+        self.assertIn(',\\"stalk_nag\\":', self.dash)
+        self.assertIn(',\\"slew_rate_enabled\\":', self.dash)
+
+        # ── UI: toggle row, loader and saver (source + generated; the
+        # minifier strips attribute quotes, so the generated header is pinned
+        # with the bare id token — the jitter precedent) ──
+        self.assertIn('id="def-stalk-nag-tgl"', self.ui)
+        for surface in (self.ui, self.ui_gen):
+            self.assertIn("def-stalk-nag-tgl", surface)
+            self.assertIn("stalk_nag:snTgl&&snTgl.checked?'1':'0'", surface)
+        load_fn = re.search(r"async function loadDefenseConfig\(\)\{.*?setText\('tb-exp'", self.ui, re.S)
+        self.assertIsNotNone(load_fn)
+        load_body = load_fn.group(0)
+        self.assertIn("d.stalk_nag", load_body)
+        # Slew renders from its own GET key, never from the master's d.enabled.
+        self.assertIn("tgl.checked=!!d.slew_rate_enabled", load_body)
+        self.assertNotIn("tgl.checked=!!d.enabled", load_body)
+        # saveHw3Slew posts ONLY its own arg to /defense_config.
+        slew_fn = re.search(r"async function saveHw3Slew\(\)\{.*?\n\}", self.ui, re.S)
+        self.assertIsNotNone(slew_fn)
+        slew_body = slew_fn.group(0)
+        self.assertIn("postForm('/defense_config',{hw3_slew:", slew_body)
+        self.assertNotIn("saveDefenseConfig()", slew_body)
+
+        # ── Layout: AP gate / auto-restore rows sit under the master switch ──
+        # (ordering inside the master card), and the ap-core-card below keeps
+        # only its status display.
+        order = [self.ui.index(t) for t in (
+            'id="def-master-tgl"', 'id="ap-core-gate-tgl"',
+            'id="ap-auto-restore-tgl"', 'id="hw3-slew-tgl"',
+        )]
+        self.assertEqual(order, sorted(order), "AP gate rows must sit between the master switch and the slew switch")
+        ap_card = re.search(r'id="ap-core-card".*?id="jitter-card"', self.ui, re.S)
+        self.assertIsNotNone(ap_card)
+        self.assertNotIn("ap-core-gate-tgl", ap_card.group(0))
+        self.assertNotIn("ap-auto-restore-tgl", ap_card.group(0))
+        # The safety strips (and their copy) are gone from both surfaces.
+        self.assertNotIn('class="safety-strip"', self.ui)
+        for surface in (self.ui, self.ui_gen):
+            self.assertNotIn("客户端 UI 无法绕过", surface)
+            self.assertNotIn("风险自担", surface)
+
+        # ── Simulator mirrors the new GET/POST keys (beta07 lesson) ──
+        for token in (
+            '"stalk_nag": STATE.stalk_nag,',
+            '"slew_rate_enabled": STATE.hw3_slew,',
+            'STATE.stalk_nag = self.form_bool(form["stalk_nag"])',
+            'STATE.hw3_slew = self.form_bool(form["hw3_slew"])',
+        ):
+            with self.subTest(simulator=token):
+                self.assertIn(token, self.simulator)
+
     def test_ap_settle_delay_chain_removed_in_v118(self) -> None:
         """v1.18: the AP-settle delay (0-3 s 延迟注入) is gone end to end — UI
         select, POST param, NVS key, settle timer, gate-mode variant, and the
@@ -3062,7 +3169,7 @@ class DashboardApiContractTests(unittest.TestCase):
         version = self.version.strip()
         # Hard version pin (dual-CAN contract convention): an accidental
         # VERSION bump without the full release pass must fail loudly here.
-        self.assertEqual("1.20.1", version)
+        self.assertEqual("1.20.10", version)
         # VERSION accepts the project's two-part release form (1.10) and the
         # existing three-part form used by older releases.
         self.assertRegex(version, r"^\d+\.\d+(?:\.\d+)?$", f"VERSION file malformed: {version!r}")

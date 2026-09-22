@@ -1301,10 +1301,27 @@ textarea.inp { resize: vertical; min-height: 60px; font-family: monospace;
     </div>
     <label class="tgl"><input type="checkbox" id="def-master-tgl" onchange="saveDefenseConfig()"><div class="tgl-track"></div></label>
   </div>
+  <!-- v1.20.10: AP 门控 / AP 自动恢复 开关从下方「AP 注入安全」卡上移到
+       总开关正下方 —— 注入门控属总开关同族的最高优先级安全项，先于其它
+       防护开关展示；下方卡片只保留运行状态显示。 -->
+  <div class="setting-row">
+    <div>
+      <div class="setting-name">AP 门控（注入门控）</div>
+      <div class="setting-desc">默认开：等 AP 确认活动后再注入（防 8.3.6 猛甩）。非 8.3.6 车型可关闭以直接注入</div>
+    </div>
+    <label class="tgl"><input id="ap-core-gate-tgl" type="checkbox" onchange="saveApGateControls()"><div class="tgl-track"></div></label>
+  </div>
+  <div class="setting-row">
+    <div>
+      <div class="setting-name">AP 自动恢复</div>
+      <div class="setting-desc">重启后恢复上次 AP 配置</div>
+    </div>
+    <label class="tgl"><input id="ap-auto-restore-tgl" type="checkbox" onchange="saveApGateControls()"><div class="tgl-track"></div></label>
+  </div>
   <div class="setting-row">
     <div>
       <div class="setting-name">启用 slew rate 限制</div>
-      <div class="setting-desc">限制偏移值下降速率</div>
+      <div class="setting-desc">限制偏移值下降速率；独立开关，不随总开关联动</div>
     </div>
     <label class="tgl">
       <input type="checkbox" id="hw3-slew-tgl" onchange="saveHw3Slew()">
@@ -1314,7 +1331,7 @@ textarea.inp { resize: vertical; min-height: 60px; font-family: monospace;
   <div class="setting-row">
     <div>
       <div class="setting-name">内置 NAG 抑制 <span class="exp-badge">Party CAN</span></div>
-      <div class="setting-desc">Legacy 使用实车 Late Human Replay；HW3 使用上游模式；HW4 安全关闭。</div>
+      <div class="setting-desc">三模式保持原有行为：Legacy 任意非零选择启用 0x370 迟回放；HW3 使用上游模式；HW4 安全关闭。</div>
     </div>
     <select id="nag-mode-select" style="display:none" onchange="saveDefenseConfig()">
       <option value="0">Off</option>
@@ -1329,7 +1346,14 @@ textarea.inp { resize: vertical; min-height: 60px; font-family: monospace;
       <div class="sel-card" data-value="3" onclick="selectCard('nag-mode-select',3)"><div class="sel-lbl">0x399 + 0x129</div><div class="sel-name">Mode C</div></div>
     </div>
   </div>
-  <div class="hint warn">Legacy：历史非零选择自动迁移为唯一的 Late Human Replay，在原厂 0x370 后约 1 ms 发送 C+1，并明确置 hands-on level 1，最多两次反向重试。HW3：A/B/C 对齐 beta.12。HW4：所有内置 NAG fail-closed。默认 Off，最终 TX 仍受 CAN、启动、OTA、AP Gate 与 Abort Guard 约束。</div>
+  <div class="setting-row">
+    <div>
+      <div class="setting-name">0x045 拨杆 NAG <span class="exp-badge">Legacy 独立开关</span></div>
+      <div class="setting-desc">Legacy 使用已验证的 0x045 单次 Resume 拨杆；独立于上方模式选择，开启时优先，0x370 三模式临时让位。</div>
+    </div>
+    <label class="tgl"><input type="checkbox" id="def-stalk-nag-tgl" onchange="saveDefenseConfig()"><div class="tgl-track"></div></label>
+  </div>
+  <div class="hint warn">Legacy 0x045 拨杆 NAG：检测到 AP 6→1 且 Hands=3 后，从有效原车 0x045 空挡模板发送一次 Resume，下一帧发送一次空挡释放；同一提醒不会重复触发；OTA / abort 期间丢弃不重试。模式选择（上方）与 HW3：A/B/C 保持上游模式。HW4：关闭。</div>
   <div class="diag-grid" style="margin-top:10px">
     <div class="diag-item"><span class="lbl">NAG 路由</span><span class="v-warn" id="nag-route">--</span></div>
     <div class="diag-item"><span class="lbl">0x370 RX / Routed</span><span class="v-info" id="nag-rx-route">0 / 0</span></div>
@@ -1405,8 +1429,9 @@ textarea.inp { resize: vertical; min-height: 60px; font-family: monospace;
   </div>
 </div>
 
-<!-- AP 注入安全（从首页迁至防护页：与 AP 门控家族集中放置；
-     下方 8.3.6 JITTER 依赖「AP 门控」先开启） -->
+<!-- AP 注入安全（v1.20.10：AP 门控 / AP 自动恢复 开关已上移至「FSD 防护
+     状态」卡总开关下方；本卡只保留运行状态显示。下方 8.3.6 JITTER 依赖
+     「AP 门控」先开启。Fail-closed 档位策略由服务端 C++ 强制不变。） -->
 <div class="card cockpit-card" id="ap-core-card">
   <div class="ck-head"><h3><span>🛡</span>AP 注入安全</h3><span class="ck-chip" id="ap-core-state-pill">等待 AP</span></div>
   <div class="state-panel" id="ap-state-panel">
@@ -1416,15 +1441,6 @@ textarea.inp { resize: vertical; min-height: 60px; font-family: monospace;
     <div class="gate-bar" id="ap-gate-bar"><i id="ap-gate-fill"></i></div>
   </div>
   <div class="src-row"><span>注入来源</span><b id="injection-source">Disabled</b></div>
-  <div class="ctl-section">注入门控（服务端强制）</div>
-  <div class="ctl-row"><div><div class="cn">AP 门控</div><div class="cd">默认开：等 AP 确认活动后再注入（防 8.3.6 猛甩）。非 8.3.6 车型可关闭以直接注入</div></div>
-    <label class="tgl"><input id="ap-core-gate-tgl" type="checkbox" onchange="saveApGateControls()"><div class="tgl-track"></div></label></div>
-  <!-- 延迟注入 / Instant Engage 行已在 v1.18 删除（#108 steer-jerk defense
-       家族 + AP-settle 延时；由 8.3.6 取消/重请求协调器取代，见防御页）。 -->
-  <div class="ctl-row"><div><div class="cn">AP 自动恢复</div><div class="cd">重启后恢复上次 AP 配置</div></div>
-    <label class="tgl"><input id="ap-auto-restore-tgl" type="checkbox" onchange="saveApGateControls()"><div class="tgl-track"></div></label></div>
-  <div class="safety-strip">⚠️ <b>Fail-closed（不变）：</b>未知 / 无效 / SNA 档位默认禁止注入；AP 断开立即清零 Gate 计时。此策略由服务端 C++ 强制（handlers.h），客户端 UI 无法绕过。</div>
-  <div class="safety-strip"><b>⚠️ China 2026.8.3.6 风险：</b>该固件收紧预检，AP 激活边沿注入仍可能触发方向盘猛甩。8.3.6 车型请开启本页「8.3.6 防甩 JITTER」。研究/教学用途，风险自担；强烈建议先 Listen-Only 验证。</div>
 </div>
 
 <!-- 8.3.6 JITTER procedure (v1.19, LittleGong-aligned) -->
@@ -2652,9 +2668,12 @@ function updateDefensePage(d){
 async function loadDefenseConfig(){
   var d=await fetchJson('/defense_config');
   if(!d)return;
+  // v1.20.10: slew 开关读自己的 slew_rate_enabled（后端真值），
+  // 不再镜像总开关 d.enabled —— 两开关从此独立显示。
   var tgl=$('hw3-slew-tgl');
-  if(tgl)tgl.checked=!!d.enabled;
+  if(tgl)tgl.checked=!!d.slew_rate_enabled;
   var master=$('def-master-tgl'); if(master)master.checked=!!d.enabled;
+  var snTgl=$('def-stalk-nag-tgl');if(snTgl)snTgl.checked=!!d.stalk_nag;
   var bio=$('def-bionic-tgl');if(bio)bio.checked=!!d.bionic_steering;
   var bioRisk=$('def-bionic-risk');if(bioRisk)bioRisk.style.display=!!d.bionic_steering?'block':'none';
   var conf=(d&&d.defense)?d:{defense:{nagMode:(d&&d.nagMode!=null)?d.nagMode:((d&&d.nag_mode!=null)?d.nag_mode:0)}};
@@ -2960,8 +2979,15 @@ async function saveHw3Speed(){
 }
 
 // ── HW3 Slew Save ──────────────────────────────────────────
+// v1.20.10: slew 开关与防护总开关解耦 —— 只提交自己的 hw3_slew 参数，
+// 不再搭 saveDefenseConfig() 的车（那会连带提交总开关并强制两值同步）。
 async function saveHw3Slew(){
-  saveDefenseConfig();
+  var tgl=$('hw3-slew-tgl');
+  try{
+    await postForm('/defense_config',{hw3_slew:(tgl&&tgl.checked)?'1':'0'});
+    showToast(T('已保存'));
+  }catch(e){}
+  loadDefenseConfig();
 }
 
 async function saveDefenseConfig(){
@@ -2971,6 +2997,7 @@ async function saveDefenseConfig(){
   var ntt=$('def-ntt-tgl');
   var ag=$('abort-guard-toggle');
   var jtTgl=$('def-jitter-tgl');
+  var snTgl=$('def-stalk-nag-tgl');
   var sound=$('def-sound-tgl');
   var isaOvr=$('def-isa-override-tgl');
   var dndVol=$('def-dnd-vol-tgl');
@@ -2985,6 +3012,7 @@ async function saveDefenseConfig(){
     nag_torque_tamper:ntt&&ntt.checked?'1':'0',
     abort_guard:ag&&ag.checked?'1':'0',
     jitter:jtTgl&&jtTgl.checked?'1':'0',
+    stalk_nag:snTgl&&snTgl.checked?'1':'0',
     sound_warning_suppression:sound&&sound.checked?'1':'0',
     isa_override:isaOvr&&isaOvr.checked?'1':'0',
     dnd_volume:dndVol&&dndVol.checked?'1':'0',

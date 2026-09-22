@@ -52,17 +52,19 @@ echo ""
 
 if [ "$SPLIT" = "1" ]; then
   echo "📦 --split：保留现有 NVS/SPIFFS，更新 bootloader、partition、OTA data 与 app0..."
+  # 资产一律用 "$DIR/" 前缀引用：SHA256SUMS 是在 $DIR 里校验的，若此处
+  # 用裸文件名，从别的目录调用脚本会烧到错误/不存在的文件。
   esptool.py --chip esp32s3 --port "$PORT" --baud 921600 write_flash -z \
-    0x0 bootloader.bin \
-    0x8000 partitions.bin \
-    0x19000 ota_data_initial.bin \
-    0x20000 firmware.bin
+    0x0 "$DIR/bootloader.bin" \
+    0x8000 "$DIR/partitions.bin" \
+    0x19000 "$DIR/ota_data_initial.bin" \
+    0x20000 "$DIR/firmware.bin"
 else
   echo "⚠️  merged-flash.bin 从 0x0 连续写入，会覆盖并清空 NVS 配置。"
   echo "⚠️  如需保留 WiFi、CAN 与运行时设置，请停止并改用 --split。"
   echo "📦 工厂式合并烧录（merged-flash.bin @ 0x0）..."
   esptool.py --chip esp32s3 --port "$PORT" --baud 921600 write_flash -z \
-    0x0 merged-flash.bin
+    0x0 "$DIR/merged-flash.bin"
 fi
 
 echo ""

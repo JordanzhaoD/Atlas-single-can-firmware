@@ -6,6 +6,62 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.20.10] - 2026-09-22
+
+Hardening of the Legacy 0x045 one-shot stalk NAG port, rebased onto the
+v1.20.1 JITTER core rollback (the original local work sat on the
+pre-rollback core; the rebase is clean because the stalk module is
+orthogonal to the JITTER machine, which stays untouched).
+
+### Fixed
+
+- 0x045 integrity byte now uses CRC8-J1850 over bytes 0..6 (the
+  field-verified `jitter_045` format) for both template validation and the
+  synthesized echo. The port had shipped with the additive vehicle checksum
+  used by 0x370/0x3EE, which never matches a genuine 0x045 — the feature was
+  dead on a real bus (fail-closed "bad045") and would have transmitted an
+  invalid checksum had a template passed. Native fixtures now pin the CRC8
+  form and assert the additive checksum must NOT validate.
+- The stalk NAG transmit path is now vetoed by the outer safety gates —
+  vehicle OTA guard and abort guard (0x399 state 8/9 driver-override latch)
+  — the same permit family as the JITTER tick, closing the parity gap with
+  every other Legacy NAG transmitter. A pending action is dropped, not
+  deferred. The AP injection gate is deliberately not applied: the trigger
+  is the AP 6->1 warning drop, an AP-inactive moment by definition.
+- flash.sh now references every asset through its absolute directory, so
+  running the script from another directory can no longer flash stale or
+  missing files after SHA256SUMS verified inside the asset directory.
+
+### Added
+
+- `stalkBlockedOuterGate` diagnostic counter plus an outer-gate regression
+  test; the OTA-guard flag is mirrored into the handler on every bus frame
+  (same task) for TX-time freshness.
+- Dedicated defense-page switch for the Legacy 0x045 stalk NAG
+  (`stalk_nag`, NVS `stalk_nag`, default off). The NAG mode selector is
+  restored to its v1.20.0 meaning — on Legacy any non-zero selection drives
+  the cadence-aware 0x370 late human replay again — and while the stalk
+  switch is on it yields, so only one NAG transmitter is ever live.
+
+### Changed
+
+- The HW3 slew-rate limit is decoupled from the FSD defense master switch:
+  it keeps its own NVS truth (`h3_slw`), moves only via its own
+  `hw3_slew` POST argument (`saveHw3Slew` no longer rides
+  `saveDefenseConfig`), and renders from `slew_rate_enabled` instead of
+  mirroring the master state. Previously the backend forced
+  `hw3OffsetSlew = dashDefenseEnabled` on every defense save and the UI
+  rendered both toggles from `d.enabled`, so the two switches always moved
+  together.
+- Defense-page layout: the AP gate (injection gate) and AP auto-restore
+  switches moved up directly under the FSD defense master switch; the
+  "AP injection safety" card below now shows status only. Two long safety
+  strips were removed to keep the page concise (the fail-closed gear policy
+  itself is unchanged and still enforced server-side).
+- `builtInNag` diagnostics switch to the stalk path (`stalkSwitch`,
+  "Legacy 0x045 Stalk Resume") while the dedicated switch is active, and
+  fall back to the baseline Legacy late-echo view otherwise.
+
 ## [1.20.1] - 2026-09-22
 
 JITTER core rollback to the v1.19.2 field-validated shape. Field report

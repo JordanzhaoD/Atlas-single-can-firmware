@@ -69,6 +69,10 @@ class SimState:
         self.ap_eap_compatible = False
         # 8.3.6 JITTER procedure switch (v1.19; default off like NVS jtr_on).
         self.jitter = False
+        # v1.20.10: Legacy 0x045 stalk NAG switch (NVS stalk_nag, default off)
+        # and the HW3 slew limit decoupled from the defense master (NVS h3_slw).
+        self.stalk_nag = False
+        self.hw3_slew = False
         self.legacy_fsd_policy = "legacy_stable"
         self.legacy_fsd_mux1 = False
         self.legacy_fsd_profile = False
@@ -171,8 +175,8 @@ class SimState:
 
         Static standby shape: switch as persisted, procedure inert (gate
         closed in the simulator default). Field set matches
-        appendJitterDiagJson in mcp2515_dashboard.h (v1.19.4: 21 keys —
-        the refresh/hold counters died with their clones).
+        appendJitterDiagJson in mcp2515_dashboard.h (v1.20.1: 22 keys —
+        bit46Refreshes restored with the v1.19.2 core rollback).
         """
         return {
             "requested": self.jitter,
@@ -511,6 +515,8 @@ class Handler(BaseHTTPRequestHandler):
                     "dnd_speed": STATE.dnd_speed,
                     "ap_eap_compatible": STATE.ap_eap_compatible,
                     "jitter": STATE.jitter,
+                    "stalk_nag": STATE.stalk_nag,
+                    "slew_rate_enabled": STATE.hw3_slew,
                 }
             )
         elif path == "/fog_light":
@@ -833,6 +839,10 @@ class Handler(BaseHTTPRequestHandler):
                 STATE.ap_eap_compatible = self.form_bool(form["ap_eap_compatible"])
             if "jitter" in form:
                 STATE.jitter = self.form_bool(form["jitter"])
+            if "stalk_nag" in form:
+                STATE.stalk_nag = self.form_bool(form["stalk_nag"])
+            if "hw3_slew" in form:
+                STATE.hw3_slew = self.form_bool(form["hw3_slew"])
             self.send_obj({"ok": True})
         elif path == "/fog_light":
             if "fogStrategy" in form:

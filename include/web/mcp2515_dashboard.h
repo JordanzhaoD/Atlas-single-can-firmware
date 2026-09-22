@@ -226,6 +226,9 @@ static DashWheelDND dashWheelDndCtrl;     // Phase 3 wheel DND controller instan
 static bool dashDefenseEnabled = false;
 static bool dashBionicSteering = false;
 static uint8_t dashNagMode = 0; // upstream beta.8: 0=Off, 1=Mode A, 2=Mode B, 3=Mode C
+// v1.20.10: dedicated Legacy 0x045 stalk-resume switch. Independent of the
+// NAG mode selector (which keeps its v1.20.0 meaning on Legacy); default off.
+static bool dashLegacyStalkNagSwitch = false;
 static NagHandler dashNagHandler;
 static bool dashSpeedNoDisturb = false;
 static bool dashDndVolume = false;       // 音量消除DND（Phase 3实现执行逻辑）
@@ -929,6 +932,10 @@ static void mcpDashOnFrame(const CanFrame &f)
         dashWheelDndCtrl.recordNative3c2(f.data, static_cast<uint32_t>(now));
     // Phase 1: OTA guard 检测 0x318 帧
     dashOtaGuardProcessFrame(f);
+    // Keep the handler's OTA mirror fresh on every frame (same task); the
+    // Legacy 0x045 stalk NAG consults it at TX time.
+    if (dashHandler)
+        dashHandler->vehicleOtaBlocked = vehicleOtaActive;
     // Phase 1: 功耗管理 — 记录 CAN 活动
     dashPowerMgmtTouchCan();
     if (dashWriteProbe.active && dashWriteProbe.state != kDashWriteProbeFailed && dashWriteProbeMatches(f))
@@ -1512,7 +1519,12 @@ static void dashApplyRuntimeState()
     isaSpeedChimeSuppressRuntime = false;
     enhancedAutopilotRuntime = false;
     const bool nagSelected = dashNagMode != static_cast<uint8_t>(BuiltInNagMode::Disabled);
-    const bool legacyLateHumanReplay = dashEffectiveHwMode == 0 && nagSelected;
+    // v1.20.10: the 0x045 stalk resume has its own switch and no longer
+    // rides on the mode selector. The selector keeps its v1.20.0 meaning on
+    // Legacy (cadence-aware late human replay); while the stalk switch is
+    // on it yields, so only one NAG transmitter is ever live.
+    const bool legacyStalkNag = dashEffectiveHwMode == 0 && dashLegacyStalkNagSwitch;
+    const bool legacyLateHumanReplay = dashEffectiveHwMode == 0 && nagSelected && !legacyStalkNag;
     const bool hw3UpstreamNag = dashEffectiveHwMode == 1 && nagSelected;
     nagKillerRuntime = canActive && hw3UpstreamNag;
     dashNagHandler.setMode(
@@ -1527,6 +1539,10 @@ static void dashApplyRuntimeState()
         dashHandler->jitterObserve3ee = dashJitterObserve3ee;
         dashHandler->jitterInhibit3ee = dashJitterInhibit3ee;
         dashHandler->checkNag = dashCheckNagDisabled;
+        // Legacy 0x045 one-shot Resume path: AP 6->1 with Hands=3 arms one
+        // Resume frame and one neutral release (dedicated switch, above).
+        dashHandler->legacyStalkNagEnabled = canActive && legacyStalkNag;
+        dashHandler->vehicleOtaBlocked = vehicleOtaActive;
         // Legacy uses one vehicle-evidence-driven path for every migrated
         // non-zero selection: fresh 0x399 HOS triggers cadence-aware late
         // human replay. HW3 keeps upstream A/B/C. HW4 fails closed.
@@ -1601,6 +1617,7 @@ static void dashSavePrefs()
     // v1.19 JITTER 8.3.6 procedure persisted switch (default off). The
     // v1.18 coordinator's "apr_on" key is no longer written.
     prefs.putBool("jtr_on", dashJitterEnabled);
+    prefs.putBool("stalk_nag", dashLegacyStalkNagSwitch);
     prefs.putBool("sp_auto", dashSpeedProfileAuto);
     prefs.putUChar("sp_sel", dashManualSpeedProfile);
     prefs.putUChar("drv_prof", dashDriveProfile);
@@ -1819,6 +1836,7 @@ static void dashLoadPrefs()
     // The persisted JITTER switch alone never arms the procedure —
     // dashApplyRuntimeState() still requires the AP injection gate open.
     dashJitterEnabled = prefs.getBool("jtr_on", false);
+    dashLegacyStalkNagSwitch = prefs.getBool("stalk_nag", false);
     dashSpeedProfileAuto = prefs.getBool("sp_auto", true);
     dashManualSpeedProfile = dashClampSpeedProfileForHw(hwMode, prefs.getUChar("sp_sel", 1));
     dashDriveProfile = prefs.getUChar("drv_prof", dashSpeedProfileAuto ? 0 : 3);
@@ -2846,32 +2864,58 @@ static void handleStatus()
     j += String(dashNagModeIsValid(dashNagMode) ? dashNagMode : dashNagModeToRaw(DashNagMode::Off));
     NagRuntimeDiag nagDiag = dashNagHandler.diag();
     const bool legacyNagPath = dashEffectiveHwMode == 0;
-    DashEpasLateEchoDiag legacyNagDiag = dashHandler ? dashHandler->lateEchoRuntimeDiag(now)
-                                                     : DashEpasLateEchoDiag{};
+    // The stalk diag drives the remapped keys only while the dedicated
+    // switch routes Legacy to the 0x045 path; otherwise the v1.20.0
+    // late-echo mapping stands.
+    const bool stalkActive = legacyNagPath && dashLegacyStalkNagSwitch;
+    DashLegacyStalkNagDiag legacyStalkDiag = dashHandler ? dashHandler->legacyStalkNagDiag()
+                                                         : DashLegacyStalkNagDiag{};
+    DashEpasLateEchoDiag legacyNagDiag{};
     j += ",\"builtInNag\":{";
     j += "\"implementation\":\"";
-    j += legacyNagPath ? "legacy_late_human_replay_v1"
-                       : (dashEffectiveHwMode == 2 ? "hw4_fail_closed" : "upstream_v3.0.2-beta.12");
+    j += stalkActive ? "legacy_045_stalk_resume_v1"
+                     : (legacyNagPath ? "legacy_late_human_replay_v1"
+                                      : (dashEffectiveHwMode == 2 ? "hw4_fail_closed" : "upstream_v3.0.2-beta.12"));
     j += "\"";
+    j += ",\"stalkSwitch\":" + String(dashLegacyStalkNagSwitch ? "true" : "false");
     j += ",\"mode\":" + String(legacyNagPath ? dashNagMode : nagDiag.mode);
-    j += ",\"modeName\":\"" + String(legacyNagPath && dashNagMode != 0 ? "Legacy Late Human Replay" : nagModeName(nagDiag.mode)) +
+    j += ",\"modeName\":\"" +
+         String(stalkActive ? "Legacy 0x045 Stalk Resume"
+                            : (legacyNagPath && dashNagMode != 0 ? "Legacy Late Human Replay" : nagModeName(nagDiag.mode))) +
          "\"";
     j += ",\"runtimeEnabled\":" + String(
-                                      legacyNagPath ? (legacyNagDiag.enabled ? "true" : "false")
-                                                    : ((bool)nagKillerRuntime ? "true" : "false"));
-    j += ",\"rxTarget\":" + String(legacyNagPath ? (uint32_t)dashNagRouteDiag.seen370 : nagDiag.rxTarget);
-    j += ",\"eligible\":" + String(legacyNagPath ? legacyNagDiag.scheduledEchoes : nagDiag.eligible);
-    j += ",\"txOk\":" + String(legacyNagPath ? legacyNagDiag.sentLateEchoes : nagDiag.txOk);
-    j += ",\"txFail\":" + String(legacyNagPath ? legacyNagDiag.txFailures : nagDiag.txFail);
+                                      stalkActive ? (legacyStalkDiag.enabled ? "true" : "false")
+                                                  : (legacyNagPath ? (legacyNagDiag.enabled ? "true" : "false")
+                                                                   : ((bool)nagKillerRuntime ? "true" : "false")));
+    j += ",\"rxTarget\":" + String(stalkActive ? legacyStalkDiag.warningEdges
+                                               : (legacyNagPath ? (uint32_t)dashNagRouteDiag.seen370 : nagDiag.rxTarget));
+    j += ",\"eligible\":" + String(stalkActive ? legacyStalkDiag.warningEdges
+                                               : (legacyNagPath ? legacyNagDiag.scheduledEchoes : nagDiag.eligible));
+    j += ",\"txOk\":" + String(stalkActive ? legacyStalkDiag.pressTxOk + legacyStalkDiag.releaseTxOk
+                                           : (legacyNagPath ? legacyNagDiag.sentLateEchoes : nagDiag.txOk));
+    j += ",\"txFail\":" + String(stalkActive ? legacyStalkDiag.pressTxFail + legacyStalkDiag.releaseTxFail
+                                             : (legacyNagPath ? legacyNagDiag.txFailures : nagDiag.txFail));
     j += ",\"context399\":" + String(nagDiag.context399);
     j += ",\"context129\":" + String(nagDiag.context129);
-    j += ",\"apState\":" + String(legacyNagPath ? legacyNagDiag.lastApState : nagDiag.apState);
-    j += ",\"handsOnState\":" + String(legacyNagPath ? legacyNagDiag.lastHos : nagDiag.handsOnState);
+    j += ",\"apState\":" + String(stalkActive ? legacyStalkDiag.apState
+                                              : (legacyNagPath ? legacyNagDiag.lastApState : nagDiag.apState));
+    j += ",\"handsOnState\":" + String(stalkActive ? legacyStalkDiag.handsOnState
+                                                   : (legacyNagPath ? legacyNagDiag.lastHos : nagDiag.handsOnState));
     j += ",\"steeringAngleX10\":" + String(nagDiag.steeringAngleX10);
     j += ",\"lastTorqueRaw\":" + String(legacyNagPath ? legacyNagDiag.lastTargetTorqueRaw : nagDiag.lastTorqueRaw);
     j += ",\"lastRxCounter\":" + String(legacyNagPath ? legacyNagDiag.lastSourceCounter : nagDiag.lastRxCounter);
     j += ",\"lastTxCounter\":" + String(legacyNagPath ? legacyNagDiag.lastInjectedCounter : nagDiag.lastTxCounter);
-    j += ",\"blockedReason\":\"" + String(legacyNagPath ? legacyNagDiag.blockedReason : nagDiag.blockedReason) + "\"";
+    j += ",\"blockedReason\":\"" +
+         String(stalkActive ? legacyStalkDiag.blockedReason
+                            : (legacyNagPath ? legacyNagDiag.blockedReason : nagDiag.blockedReason)) +
+         "\"";
+    j += ",\"stalkArmed\":" + String(legacyStalkDiag.armed ? "true" : "false");
+    j += ",\"stalkPressPending\":" + String(legacyStalkDiag.pressPending ? "true" : "false");
+    j += ",\"stalkReleasePending\":" + String(legacyStalkDiag.releasePending ? "true" : "false");
+    j += ",\"stalkTemplateValid\":" + String(legacyStalkDiag.templateValid ? "true" : "false");
+    j += ",\"stalkPressTxOk\":" + String(legacyStalkDiag.pressTxOk);
+    j += ",\"stalkReleaseTxOk\":" + String(legacyStalkDiag.releaseTxOk);
+    j += ",\"stalkBlockedOuterGate\":" + String(legacyStalkDiag.blockedOuterGate);
     j += ",\"profileIndex\":" + String(legacyNagDiag.profileIndex);
     j += ",\"replayAttempts\":" + String(legacyNagDiag.replayAttempts);
     j += ",\"replaySuccesses\":" + String(legacyNagDiag.replaySuccesses);
@@ -3850,6 +3894,9 @@ static String dashDefenseConfigJson()
     // the top-level jitter object on /status).
     j += ",\"jitter\":";
     j += dashJitterEnabled ? "true" : "false";
+    // v1.20.10: dedicated Legacy 0x045 stalk-resume switch state.
+    j += ",\"stalk_nag\":";
+    j += dashLegacyStalkNagSwitch ? "true" : "false";
     // Bionic disabled warning (3 consecutive failures)
     bool bionicDisabled = dashHandler ? dashHandler->bionicDisabled() : dashBionicDisabled;
     j += ",\"bionic_disabled\":";
@@ -3883,7 +3930,9 @@ static void handleDefenseConfig()
         server.hasArg("nag_mode") || server.hasArg("nagMode") ||
         server.hasArg("nag_torque_tamper") ||
         server.hasArg("abort_guard") ||
-        server.hasArg("jitter"))
+        server.hasArg("jitter") ||
+        server.hasArg("stalk_nag") ||
+        server.hasArg("hw3_slew"))
     {
         const bool hasNagModeArg = server.hasArg("nag_mode") || server.hasArg("nagMode");
         DashNagMode parsedNagMode = dashNagModeFromRaw(dashNagMode);
@@ -3938,6 +3987,11 @@ static void handleDefenseConfig()
         // only with the AP injection gate open — fail-closed).
         if (server.hasArg("jitter"))
             dashJitterEnabled = dashArgTruthy(server.arg("jitter"));
+        // v1.20.10: dedicated Legacy 0x045 stalk-resume switch. Independent
+        // of nag_mode; dashApplyRuntimeState() below routes Legacy to 0x045
+        // (and yields the 0x370 late echo) only while this is on.
+        if (server.hasArg("stalk_nag"))
+            dashLegacyStalkNagSwitch = dashArgTruthy(server.arg("stalk_nag"));
         if (server.hasArg("sound_warning_suppression"))
         {
             bool v = dashArgTruthy(server.arg("sound_warning_suppression"));
@@ -3966,7 +4020,19 @@ static void handleDefenseConfig()
             dashWheelDndCtrl.startSpeed();
         if (server.hasArg("ap_eap_compatible"))
             dashApEapCompatible = dashArgTruthy(server.arg("ap_eap_compatible"));
-        hw3OffsetSlew = dashDefenseEnabled;
+        // v1.20.10: the HW3 slew-rate limit is decoupled from the defense
+        // master switch — it keeps its own NVS truth (h3_slw) and only moves
+        // when its own POST arg arrives (UI saveHw3Slew). BanShield still
+        // follows the master by design.
+        if (server.hasArg("hw3_slew"))
+        {
+            bool v = dashArgTruthy(server.arg("hw3_slew"));
+            if (v != hw3OffsetSlew)
+            {
+                hw3OffsetSlew = v;
+                dashLog("[CFG] HW3 offset slew " + String(v ? "ON" : "OFF"));
+            }
+        }
         nvsBanShieldEnable = dashDefenseEnabled;
         if (dashHandler)
             dashHandler->banShieldEnable = dashDefenseEnabled;
@@ -6546,6 +6612,7 @@ static void handleSettingsExport()
     uint8_t storedLegacyCustomPctVeryHigh = dashLegacyCustomPctVeryHigh;
     bool storedAbortGuard = dashAbortGuardEnabled;
     bool storedJitter = dashJitterEnabled;
+    bool storedStalkNag = dashLegacyStalkNagSwitch;
     bool storedLightingEnabled = dashLightingEnabled;
     uint8_t storedLightingCount = dashLightingCount;
     uint8_t storedLightingFrequency = dashLightingFrequency;
@@ -6784,6 +6851,7 @@ static void handleSettingsExport()
     // steer-jerk defense family; the 8.3.6 re-request switch takes their slot.
     j += ",\"abortGuard\":" + String(storedAbortGuard ? "true" : "false");
     j += ",\"jitter\":" + String(storedJitter ? "true" : "false");
+    j += ",\"stalkNag\":" + String(storedStalkNag ? "true" : "false");
     j += ",\"speedNoDisturb\":" + String(storedSpeedNoDisturb ? "true" : "false");
     j += ",\"dndVolume\":" + String(storedDndVolume ? "true" : "false");
     j += ",\"dndSpeed\":" + String(storedDndSpeed ? "true" : "false");
@@ -7108,6 +7176,8 @@ static void handleSettingsImport()
             p.putBool("def_ag", defense["abortGuard"].as<bool>());
         if (defense["jitter"].is<bool>())
             p.putBool("jtr_on", defense["jitter"].as<bool>());
+        if (defense["stalkNag"].is<bool>())
+            p.putBool("stalk_nag", defense["stalkNag"].as<bool>());
         if (defense["speedNoDisturb"].is<bool>())
             p.putBool("def_nd", defense["speedNoDisturb"].as<bool>());
         if (defense["dndVolume"].is<bool>())
