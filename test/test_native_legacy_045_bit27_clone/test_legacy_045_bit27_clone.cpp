@@ -163,8 +163,9 @@ void test_context_staleness_blocks_cloning()
     uint8_t out[8] = {};
     arm(c);
     seedInWindow(c, 1000, 2);
-    feedNative(c, 0x0D, 1900); // native stays fresh
-    TEST_ASSERT_FALSE(c.nextFrame(2100, out)); // 0x399 silent > 1 s
+    // Native stays fresh, but 0x399 goes silent past the 1 s context window.
+    feedNative(c, 0x0D, 1900);
+    TEST_ASSERT_FALSE(c.nextFrame(2100, out));
     TEST_ASSERT_EQUAL(DashLegacy045Clone27Block::ContextStale, c.diag.blocked);
 }
 
