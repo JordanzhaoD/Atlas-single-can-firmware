@@ -262,3 +262,6 @@ release/
 node_modules/
 package-lock.json
 package.json
+
+# Hermetic platformio core (2026-11-19): repo-local packages cache
+.pio-core/
