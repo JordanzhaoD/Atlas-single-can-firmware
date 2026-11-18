@@ -756,6 +756,76 @@ static void appJitterTick()
     dashRecordCanFrame(f, ok ? 'T' : 'E');
     dashJitterCtrl.recordTxResult(ok);
 }
+
+// v1.20.11 Legacy 0x045 bit27 clone DND tick (ported verbatim from the
+// dual-CAN 6.0.0-beta17 firmware, commit 7f24209) — status declaration, not
+// an action spoof: clones the latest native 0x45 off the single CAN bus
+// (the DAS/CH line), sets StW_Cond_Flt bit27, bumps the rolling counter and
+// re-CRCs, every 1500 ms while handsOnState is in the {2..5} window and
+// autopilotState > 3. Window hard-closes at 6+: the module never contests
+// the strike-out domain (see dash_legacy_045_bit27_clone.h). Permit family
+// = appJitterTick plus the clone switch and the JITTER procedure's
+// exclusive claim on 0x045 (StalkOwnedByJitter).
+static void appClone27Tick()
+{
+    const uint32_t now = millis();
+    dashLegacy045Clone27Ctrl.configure(dashClone27Dnd);
+
+    DashLegacy045Clone27Block gateBlock = DashLegacy045Clone27Block::None;
+    if (!canActive || !dashClone27Dnd)
+        gateBlock = DashLegacy045Clone27Block::Disabled;
+    else if (!dashLegacyHandlerActive())
+        gateBlock = DashLegacy045Clone27Block::NotLegacy;
+    else if (dashJitterCtrl.procedureActive())
+        gateBlock = DashLegacy045Clone27Block::StalkOwnedByJitter;
+    else if (vehicleOtaActive)
+        gateBlock = DashLegacy045Clone27Block::OtaGuard;
+    else if (dashHandler && !dashHandler->abortGuard.allowsInjection())
+    {
+        // Single-CAN discipline (the handlers.h stalk-nag precedent): the
+        // abort guard only records a block when the module actually had a
+        // clone to send, so an idle bus does not inflate its counters.
+        if (dashLegacy045Clone27Ctrl.diag.inWindow &&
+            dashLegacy045Clone27Ctrl.diag.apGateOk &&
+            dashLegacy045Clone27Ctrl.diag.nativeSeen)
+            dashHandler->abortGuard.recordBlock(DashAbortGuardBlockPath::Legacy045Bit27Clone);
+        gateBlock = DashLegacy045Clone27Block::AbortGuard;
+    }
+    else if (!appDriver)
+        gateBlock = DashLegacy045Clone27Block::TwaiUnavailable;
+
+    static uint32_t lastTwaiCheckMs = 0;
+    static bool twaiReady = true;
+    if (gateBlock == DashLegacy045Clone27Block::None &&
+        (lastTwaiCheckMs == 0 || now - lastTwaiCheckMs >= 100))
+    {
+        lastTwaiCheckMs = now;
+        TWAIDriver *twai = static_cast<TWAIDriver *>(appDriver.get());
+        twaiReady = twai->snapshotDiag().state == DashTwaiState::Running;
+    }
+    if (gateBlock == DashLegacy045Clone27Block::None && !twaiReady)
+        gateBlock = DashLegacy045Clone27Block::TwaiUnavailable;
+
+    const bool runtimeAllowed = gateBlock == DashLegacy045Clone27Block::None;
+    dashLegacy045Clone27Ctrl.setRuntimeAllowed(runtimeAllowed, gateBlock);
+    if (!runtimeAllowed)
+        return;
+
+    uint8_t data[8];
+    if (dashLegacy045Clone27Ctrl.nextFrame(now, data))
+    {
+        CanFrame f = {};
+        f.id = DashLegacy045Clone27::kCanId;
+        f.dlc = 8;
+        memcpy(f.data, data, 8);
+        f.bus = CAN_BUS_DEFAULT;
+        dashLegacy045Clone27Ctrl.diag.tx.recordAttempt(f.id, f.bus, f.dlc, f.data, now);
+        const bool ok = appDriver->send(f);
+        dashLegacy045Clone27Ctrl.diag.tx.recordResult(ok);
+        dashLegacy045Clone27Ctrl.recordTxResult(ok, now);
+        dashRecordCanFrame(f, ok ? 'T' : 'E');
+    }
+}
 #endif // ESP32_DASHBOARD
 
 static void app_can_task(void *)
@@ -766,6 +836,7 @@ static void app_can_task(void *)
         bool processed = appLoop<TWAIDriver>();
 #ifdef ESP32_DASHBOARD
         appJitterTick();
+        appClone27Tick();
 #endif
 #ifdef DRIVER_T2CAN_DUAL
         t2canDrainSecondary();

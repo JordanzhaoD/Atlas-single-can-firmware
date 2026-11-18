@@ -67,6 +67,8 @@ jobs:
           - native_hw4
           - native_legacy
           - native_legacy_speed
+          - native_legacy_stalk_nag
+          - native_legacy_045_bit27_clone
           - native_abort_guard
           - native_helpers
           - native_twai

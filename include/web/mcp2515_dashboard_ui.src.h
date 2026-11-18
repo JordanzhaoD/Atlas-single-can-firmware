@@ -1354,6 +1354,14 @@ textarea.inp { resize: vertical; min-height: 60px; font-family: monospace;
     <label class="tgl"><input type="checkbox" id="def-stalk-nag-tgl" onchange="saveDefenseConfig()"><div class="tgl-track"></div></label>
   </div>
   <div class="hint warn">Legacy 0x045 拨杆 NAG：检测到 AP 6→1 且 Hands=3 后，从有效原车 0x045 空挡模板发送一次 Resume，下一帧发送一次空挡释放；同一提醒不会重复触发；OTA / abort 期间丢弃不重试。模式选择（上方）与 HW3：A/B/C 保持上游模式。HW4：关闭。</div>
+  <div class="setting-row">
+    <div>
+      <div class="setting-name">Legacy 状态克隆免打扰 <span class="exp-badge">参考固件参数</span></div>
+      <div class="setting-desc">0x045 bit27 (StW_Cond_Flt) 状态克隆：handsOn 窗【2,5】+ AP 激活门 + 1.5s 间隔，预防提醒产生而非事后清除；到状态 6 自动停手，永不对抗红色方向盘接管。</div>
+    </div>
+    <label class="tgl"><input type="checkbox" id="def-clone27-tgl" onchange="saveDefenseConfig()"><div class="tgl-track"></div></label>
+  </div>
+  <div class="hint warn">Legacy 状态克隆免打扰（双CAN beta17 同款引擎）：克隆最新原生 0x045 并置位 bit27 声明方向盘状态，nag 从源头不产生，无交互累积、无 strike-out；物理滚轮活动期间永不克隆；连续 2 次 TX 失败自动解除，重新打开开关恢复。诊断见 /status clone27Diag。</div>
   <div class="diag-grid" style="margin-top:10px">
     <div class="diag-item"><span class="lbl">NAG 路由</span><span class="v-warn" id="nag-route">--</span></div>
     <div class="diag-item"><span class="lbl">0x370 RX / Routed</span><span class="v-info" id="nag-rx-route">0 / 0</span></div>
@@ -2674,6 +2682,7 @@ async function loadDefenseConfig(){
   if(tgl)tgl.checked=!!d.slew_rate_enabled;
   var master=$('def-master-tgl'); if(master)master.checked=!!d.enabled;
   var snTgl=$('def-stalk-nag-tgl');if(snTgl)snTgl.checked=!!d.stalk_nag;
+  var c27Tgl=$('def-clone27-tgl');if(c27Tgl)c27Tgl.checked=!!d.clone27_dnd;
   var bio=$('def-bionic-tgl');if(bio)bio.checked=!!d.bionic_steering;
   var bioRisk=$('def-bionic-risk');if(bioRisk)bioRisk.style.display=!!d.bionic_steering?'block':'none';
   var conf=(d&&d.defense)?d:{defense:{nagMode:(d&&d.nagMode!=null)?d.nagMode:((d&&d.nag_mode!=null)?d.nag_mode:0)}};
@@ -2998,6 +3007,7 @@ async function saveDefenseConfig(){
   var ag=$('abort-guard-toggle');
   var jtTgl=$('def-jitter-tgl');
   var snTgl=$('def-stalk-nag-tgl');
+  var c27Tgl=$('def-clone27-tgl');
   var sound=$('def-sound-tgl');
   var isaOvr=$('def-isa-override-tgl');
   var dndVol=$('def-dnd-vol-tgl');
@@ -3013,6 +3023,7 @@ async function saveDefenseConfig(){
     abort_guard:ag&&ag.checked?'1':'0',
     jitter:jtTgl&&jtTgl.checked?'1':'0',
     stalk_nag:snTgl&&snTgl.checked?'1':'0',
+    clone27_dnd:c27Tgl&&c27Tgl.checked?'1':'0',
     sound_warning_suppression:sound&&sound.checked?'1':'0',
     isa_override:isaOvr&&isaOvr.checked?'1':'0',
     dnd_volume:dndVol&&dndVol.checked?'1':'0',

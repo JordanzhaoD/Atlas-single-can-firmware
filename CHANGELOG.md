@@ -6,6 +6,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [1.20.11] - 2026-11-19
+
+Port of the Legacy 0x045 bit27 clone DND ("status declaration" nag
+prevention) from the dual-CAN 6.0.0-beta17 firmware (commit 7f24209,
+2026-11-18). The engine, its reference-firmware parameters and its safety
+rails are ported verbatim; only the injection line differs (the single CAN
+bus here plays the role of the dual-CAN CAN1 / DAS-CH line).
+
+### Added
+
+- `dash_legacy_045_bit27_clone.h`: periodically clones the latest native
+  0x045 frame with StW_Cond_Flt bit27 set (data[3] bit3), rolling counter
+  +1 and CRC8-J1850 recomputed, every 1500 ms while
+  `DAS_autopilotHandsOnState` is in {2..5} and `autopilotState > 3`. The
+  window hard-fails-closed at 6+ so the module never contests the
+  strike-out domain. This is prevention (the hands-on nag never arms)
+  rather than clearance, so there is no interaction-without-torque debt
+  and no strike-out accumulation — the failure mode that retired the
+  gesture-spoofing routes on the dual-CAN side.
+- Full wiring: RX feeds for native 0x045 and 0x399 (apState + the same
+  4-bit handsOn field the Legacy handler decodes), the `appClone27Tick`
+  CAN-task tick using the appJitterTick permit family plus a
+  StalkOwnedByJitter gate (the JITTER procedure keeps its exclusive claim
+  on 0x045), abort-guard path `legacy_0x045_bit27_clone` (block recorded
+  only when a clone was actually pending — idle-bus counter discipline),
+  NVS key `def_c27`, `/defense_config` fields `clone27_dnd` /
+  `legacy_045_bit27_clone`, `/status` `clone27Diag` diagnostics object,
+  settings backup export/import, and a defense-page toggle ("Legacy
+  status-clone DND", default off).
+- Native suite `test_native_legacy_045_bit27_clone` (16 tests, ported
+  verbatim) and API-contract pins for the engine parameters, the wiring
+  chain and the tick permit family.
+
 ## [1.20.10] - 2026-09-22
 
 Hardening of the Legacy 0x045 one-shot stalk NAG port, rebased onto the

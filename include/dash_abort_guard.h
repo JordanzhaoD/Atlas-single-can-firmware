@@ -27,6 +27,7 @@ enum class DashAbortGuardBlockPath : uint8_t
     Hw4FsdMux0,
     Hw4FsdMux1,
     Hw4FsdMux2,
+    Legacy045Bit27Clone,
 };
 
 struct DashAbortGuardDiag
@@ -84,6 +85,9 @@ inline const char *dashAbortGuardBlockPathName(DashAbortGuardBlockPath path)
         return "hw4_fsd_mux1";
     case DashAbortGuardBlockPath::Hw4FsdMux2:
         return "hw4_fsd_mux2";
+    // v1.20.11: Legacy 0x045 bit27 clone DND (ported from dual-CAN beta17).
+    case DashAbortGuardBlockPath::Legacy045Bit27Clone:
+        return "legacy_0x045_bit27_clone";
     case DashAbortGuardBlockPath::None:
     default:
         return "none";

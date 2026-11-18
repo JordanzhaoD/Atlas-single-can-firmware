@@ -12,6 +12,7 @@ HANDLERS = ROOT / "include" / "handlers.h"
 CAN_HELPERS = ROOT / "include" / "can_helpers.h"
 ABORT_GUARD = ROOT / "include" / "dash_abort_guard.h"
 STALK_NAG = ROOT / "include" / "dash_legacy_stalk_nag.h"
+CLONE27 = ROOT / "include" / "dash_legacy_045_bit27_clone.h"
 LEGACY_SPEED = ROOT / "include" / "dash_legacy_speed.h"
 MAIN = ROOT / "src" / "main.cpp"
 VERSION = ROOT / "VERSION"
@@ -36,6 +37,7 @@ class DashboardApiContractTests(unittest.TestCase):
         cls.can_helpers = CAN_HELPERS.read_text(encoding="utf-8")
         cls.abort_guard = ABORT_GUARD.read_text(encoding="utf-8")
         cls.stalk_nag = STALK_NAG.read_text(encoding="utf-8")
+        cls.clone27 = CLONE27.read_text(encoding="utf-8")
         cls.legacy_speed = LEGACY_SPEED.read_text(encoding="utf-8")
         cls.main = MAIN.read_text(encoding="utf-8")
         cls.version = VERSION.read_text(encoding="utf-8")
@@ -2053,6 +2055,84 @@ class DashboardApiContractTests(unittest.TestCase):
         self.assertIn("jitter_045::crc8J1850(frame.data, 7) == frame.data[7]", self.stalk_nag)
         self.assertIn("out.data[7] = jitter_045::crc8J1850(out.data, 7);", self.stalk_nag)
 
+    def test_legacy_clone27_dnd_engine_pins_reference_parameters(self) -> None:
+        """The bit27 clone engine must keep the field-verified reference
+        parameters verbatim (ported from dual-CAN beta17, commit 7f24209):
+        handsOn window {2..5} with a hard fail-close at 6, autopilotState
+        gate > 3, 1500 ms interval, StW_Cond_Flt = data[3] bit3."""
+        for token in [
+            "static constexpr uint32_t kCloneIntervalMs = 1500;",
+            "static constexpr uint8_t kApGateStateAbove = 3;",
+            "static constexpr uint8_t kWindowLo = 2;",
+            "static constexpr uint8_t kWindowHi = 5;",
+            "static constexpr uint8_t kBit27Mask = 0x08;",
+            "static constexpr uint32_t kNativeMaxAgeMs = 150;",
+            "static constexpr uint32_t kOwnEchoWindowMs = 30;",
+            "static constexpr uint8_t kMaxConsecutiveTxFailures = 2;",
+        ]:
+            with self.subTest(param=token):
+                self.assertIn(token, self.clone27)
+        # The clone only changes bit27, the rolling counter and the CRC —
+        # the human's scroll fields are copied untouched.
+        self.assertIn("outData[3] = static_cast<uint8_t>(outData[3] | kBit27Mask);", self.clone27)
+        self.assertIn("outData[7] = crc8J1850(outData, 7);", self.clone27)
+        # Safety rails: own-echo fingerprint drop, physical-scroll skip,
+        # auto-disarm, counter continuation from the latest native frame.
+        self.assertIn("hasTxFingerprint_ && nowMs - txFingerprintMs_ <= kOwnEchoWindowMs", self.clone27)
+        self.assertIn("++diag.physicalSkip;", self.clone27)
+        self.assertIn("DashLegacy045Clone27State::AutoDisarmed", self.clone27)
+        self.assertIn("(counter(nativeData_) + 1) & 0x0F", self.clone27)
+
+    def test_legacy_clone27_dnd_wiring_is_complete(self) -> None:
+        """The clone27 switch must survive the full chain: NVS def_c27,
+        /defense_config clone27_dnd + legacy_045_bit27_clone, /status
+        clone27Diag, settings export/import, the UI toggle, and the RX
+        feeds for 0x045 and 0x399."""
+        self.assertIn('prefs.putBool("def_c27", dashClone27Dnd);', self.dash)
+        self.assertIn('dashClone27Dnd = prefs.getBool("def_c27", false);', self.dash)
+        self.assertIn(',\\"clone27_dnd\\":', self.dash)
+        self.assertIn(',\\"legacy_045_bit27_clone\\":', self.dash)
+        self.assertIn('server.hasArg("clone27_dnd")', self.dash)
+        self.assertIn('server.hasArg("legacy_045_bit27_clone")', self.dash)
+        # Rising edge of the switch resets the runtime slate.
+        self.assertIn("dashLegacy045Clone27Ctrl.resetRuntime();", self.dash)
+        # /status diagnostics object (emitted via the R"JSON" raw-string
+        # form like the wheel DND diag, so the pin matches unescaped).
+        self.assertIn(',"clone27Diag":{"enabled":', self.dash)
+        # Settings backup round-trip.
+        self.assertIn(',\\"clone27Dnd\\":', self.dash)
+        self.assertIn('p.putBool("def_c27", defense["clone27Dnd"].as<bool>());', self.dash)
+        # RX feeds: native 0x45 base + 0x399 apState/handsState context
+        # (the same 4-bit handsOn field the Legacy handler decodes).
+        self.assertIn("dashLegacy045Clone27Ctrl.onNative045(f.data, f.dlc,", self.dash)
+        self.assertIn("dashLegacy045Clone27Ctrl.onDasStatus(apState, handsState, f.bus,", self.dash)
+        self.assertIn("static_cast<uint8_t>((f.data[5] >> 2) & 0x0F);", self.dash)
+        # UI toggle exists in the source UI and posts the field.
+        self.assertIn('id="def-clone27-tgl"', self.ui)
+        self.assertIn("clone27_dnd:c27Tgl&&c27Tgl.checked?'1':'0',", self.ui)
+        self.assertIn("c27Tgl.checked=!!d.clone27_dnd", self.ui)
+
+    def test_legacy_clone27_tick_uses_the_jitter_permit_family(self) -> None:
+        """The clone27 tick must run on the CAN task next to appJitterTick
+        and be vetoed by the outer gates: the clone switch, Legacy handler,
+        the JITTER procedure's exclusive claim on 0x045, the vehicle OTA
+        guard, the abort guard (recording blocks only with work pending),
+        and the driver."""
+        self.assertIn("static void appClone27Tick()", self.main)
+        self.assertIn("appJitterTick();\n        appClone27Tick();", self.main)
+        self.assertIn("dashJitterCtrl.procedureActive()", self.main)
+        self.assertIn("DashLegacy045Clone27Block::StalkOwnedByJitter", self.main)
+        # The abort-guard block is only recorded when the module had a clone
+        # to send (single-CAN idle-bus discipline, handlers.h precedent).
+        self.assertIn("dashHandler->abortGuard.recordBlock(DashAbortGuardBlockPath::Legacy045Bit27Clone);", self.main)
+        self.assertIn("dashLegacy045Clone27Ctrl.diag.inWindow &&", self.main)
+        # TX rides the same driver + bus as the JITTER stalk frames.
+        self.assertIn("dashLegacy045Clone27Ctrl.nextFrame(now, data)", self.main)
+        self.assertIn("dashLegacy045Clone27Ctrl.recordTxResult(ok, now);", self.main)
+        # Abort-guard enum path is named.
+        self.assertIn("Legacy045Bit27Clone,", self.abort_guard)
+        self.assertIn('return "legacy_0x045_bit27_clone";', self.abort_guard)
+
     def test_phase3_defense_config_exposes_dnd_params(self) -> None:
         """defense_config must accept and return dnd_volume and dnd_speed."""
         defense = re.search(r"static void handleDefenseConfig\(\).*?server\.send\(200", self.dash, re.S)
@@ -3169,7 +3249,7 @@ class DashboardApiContractTests(unittest.TestCase):
         version = self.version.strip()
         # Hard version pin (dual-CAN contract convention): an accidental
         # VERSION bump without the full release pass must fail loudly here.
-        self.assertEqual("1.20.10", version)
+        self.assertEqual("1.20.11", version)
         # VERSION accepts the project's two-part release form (1.10) and the
         # existing three-part form used by older releases.
         self.assertRegex(version, r"^\d+\.\d+(?:\.\d+)?$", f"VERSION file malformed: {version!r}")

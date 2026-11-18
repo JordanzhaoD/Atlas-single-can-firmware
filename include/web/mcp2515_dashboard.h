@@ -48,6 +48,7 @@
 #include "dash_fog_light.h"
 #include "dash_wheel_dnd.h"
 #include "dash_jitter_procedure.h"
+#include "dash_legacy_045_bit27_clone.h"
 #include "dash_tx_evidence.h"
 #include "dash_capabilities.h"
 #include "dash_twai_diag.h"
@@ -229,6 +230,11 @@ static uint8_t dashNagMode = 0; // upstream beta.8: 0=Off, 1=Mode A, 2=Mode B, 3
 // v1.20.10: dedicated Legacy 0x045 stalk-resume switch. Independent of the
 // NAG mode selector (which keeps its v1.20.0 meaning on Legacy); default off.
 static bool dashLegacyStalkNagSwitch = false;
+// v1.20.11: Legacy 0x045 bit27 状态克隆免打扰（ported from dual-CAN beta17,
+// commit 7f24209）— 窗{2..5} / DAS>3 / 1.5s；预防提醒产生而非事后清除。
+// Default off; NVS def_c27; tick in main.cpp appClone27Tick().
+static bool dashClone27Dnd = false;
+static DashLegacy045Clone27 dashLegacy045Clone27Ctrl;
 static NagHandler dashNagHandler;
 static bool dashSpeedNoDisturb = false;
 static bool dashDndVolume = false;       // 音量消除DND（Phase 3实现执行逻辑）
@@ -900,15 +906,26 @@ static void mcpDashOnFrame(const CanFrame &f)
         followDist = (f.data[5] & 0xE0) >> 5;
     dashRecordApRestoreFrame(f, now);
     dashRecordCanFrame(f, 'R');
-    // v1.19 JITTER procedure: raw 0x045 stream feeds the carrier-lock cache
-    // (the pump only transmits riding behind a <47 ms old native frame).
     if (f.id == 69)
+    {
+        // v1.19 JITTER: raw 0x045 stream feeds the carrier-lock cache (the
+        // pump only transmits riding behind a <47 ms old native frame).
+        // v1.20.11: the same stream feeds the bit27 clone's native base
+        // (freshness / counter continuation / own-echo all live there).
         dashJitterCtrl.observeNative045(f.data, static_cast<uint32_t>(now));
-    // 0x399 (921) DAS_status low nibble is the JITTER event source.
+        dashLegacy045Clone27Ctrl.onNative045(f.data, f.dlc,
+                                             static_cast<uint32_t>(now));
+    }
+    // 0x399 (921) DAS_status low nibble is the JITTER event source; the
+    // v1.20.11 bit27 clone additionally consumes handsOnState (data[5] bits
+    // 5:2, the same 4-bit field the Legacy handler decodes).
     if (f.id == 921 && f.dlc >= 6 && dashLegacyHandlerActive())
     {
         const uint8_t apState = static_cast<uint8_t>(f.data[0] & 0x0F);
+        const uint8_t handsState =
+            static_cast<uint8_t>((f.data[5] >> 2) & 0x0F);
         dashJitterCtrl.observeDasStatus(apState, static_cast<uint32_t>(now));
+        dashLegacy045Clone27Ctrl.onDasStatus(apState, handsState, f.bus, static_cast<uint32_t>(now));
     }
     // 0x488 (1160) DAS steering control: JITTER abort watch (admitted to the
     // TWAI filter in v1.19). Angle = ((b0<<8|b1)&0x7FFF − 16384) × 0.1° per
@@ -1618,6 +1635,7 @@ static void dashSavePrefs()
     // v1.18 coordinator's "apr_on" key is no longer written.
     prefs.putBool("jtr_on", dashJitterEnabled);
     prefs.putBool("stalk_nag", dashLegacyStalkNagSwitch);
+    prefs.putBool("def_c27", dashClone27Dnd);
     prefs.putBool("sp_auto", dashSpeedProfileAuto);
     prefs.putUChar("sp_sel", dashManualSpeedProfile);
     prefs.putUChar("drv_prof", dashDriveProfile);
@@ -1837,6 +1855,7 @@ static void dashLoadPrefs()
     // dashApplyRuntimeState() still requires the AP injection gate open.
     dashJitterEnabled = prefs.getBool("jtr_on", false);
     dashLegacyStalkNagSwitch = prefs.getBool("stalk_nag", false);
+    dashClone27Dnd = prefs.getBool("def_c27", false);
     dashSpeedProfileAuto = prefs.getBool("sp_auto", true);
     dashManualSpeedProfile = dashClampSpeedProfileForHw(hwMode, prefs.getUChar("sp_sel", 1));
     dashDriveProfile = prefs.getUChar("drv_prof", dashSpeedProfileAuto ? 0 : 3);
@@ -2433,6 +2452,70 @@ static void appendWheelDndDiagJson(String &j, unsigned long now)
     j += dashWheelDndCtrl.diag.sequenceState;
     j += R"JSON(","tx":)JSON";
     appendTxEvidenceJson(j, dashWheelDndCtrl.diag.tx, now);
+    j += "}";
+}
+
+// v1.20.11: Legacy 0x045 bit27 clone DND diagnostics (ported verbatim from
+// the dual-CAN beta17 firmware): the /status clone27Diag object.
+static void appendClone27DiagJson(String &j, unsigned long now)
+{
+    const DashLegacy045Clone27Diag &d = dashLegacy045Clone27Ctrl.diag;
+    j += R"JSON(,"clone27Diag":{"enabled":)JSON";
+    j += d.configured ? "true" : "false";
+    j += R"JSON(,"armed":)JSON";
+    j += d.runtimeArmed ? "true" : "false";
+    j += R"JSON(,"autoDisarmed":)JSON";
+    j += d.autoDisarmed ? "true" : "false";
+    j += R"JSON(,"apGateOk":)JSON";
+    j += d.apGateOk ? "true" : "false";
+    j += R"JSON(,"inWindow":)JSON";
+    j += d.inWindow ? "true" : "false";
+    j += R"JSON(,"apState":)JSON";
+    j += d.apState;
+    j += R"JSON(,"handsState":)JSON";
+    j += d.handsState;
+    j += R"JSON(,"dasStatusAgeMs":)JSON";
+    j += d.dasStatusMs ? String(now - d.dasStatusMs) : String(-1);
+    j += R"JSON(,"native045Seen":)JSON";
+    j += d.nativeSeen ? "true" : "false";
+    j += R"JSON(,"native045Fresh":)JSON";
+    j += d.nativeFresh ? "true" : "false";
+    j += R"JSON(,"native045AgeMs":)JSON";
+    j += d.nativeMs ? String(now - d.nativeMs) : String(-1);
+    j += R"JSON(,"nativeCounter":)JSON";
+    j += d.nativeCounter;
+    j += R"JSON(,"cloneCounter":)JSON";
+    j += d.cloneCounter;
+    j += R"JSON(,"cloneTx":)JSON";
+    j += d.cloneTx;
+    j += R"JSON(,"cloneTxFailed":)JSON";
+    j += d.cloneTxFailed;
+    j += R"JSON(,"windowEntries":)JSON";
+    j += d.windowEntries;
+    j += R"JSON(,"physicalSkip":)JSON";
+    j += d.physicalSkip;
+    j += R"JSON(,"ownEchoRx":)JSON";
+    j += d.ownEchoRx;
+    j += R"JSON(,"nativeInvalid":)JSON";
+    j += d.nativeInvalid;
+    j += R"JSON(,"nativeRx":)JSON";
+    j += d.nativeRx;
+    j += R"JSON(,"consecutiveTxFailures":)JSON";
+    j += d.consecutiveTxFailures;
+    j += R"JSON(,"lastCloneAgeMs":)JSON";
+    j += d.lastCloneMs ? String(now - d.lastCloneMs) : String(-1);
+    j += R"JSON(,"cooldownRemainingMs":)JSON";
+    j += d.cooldownRemainingMs;
+    j += R"JSON(,"protocol":"legacy_0x045_bit27_clone")JSON";
+    j += R"JSON(,"params":"win[2,5] das>3 1500ms")JSON";
+    j += R"JSON(,"sequenceState":")JSON";
+    j += dashLegacy045Clone27StateName(d.state);
+    j += "\"";
+    j += R"JSON(,"blockedReason":")JSON";
+    j += dashLegacy045Clone27BlockName(d.blocked);
+    j += "\"";
+    j += R"JSON(","tx":)JSON";
+    appendTxEvidenceJson(j, d.tx, now);
     j += "}";
 }
 
@@ -3138,6 +3221,7 @@ static void handleStatus()
 #endif
     appendServiceDiagJson(j, now);
     appendWheelDndDiagJson(j, now);
+    appendClone27DiagJson(j, now);
     // ── Phase 1 新增状态字段 ──────────────────────────────────────────
     j += ",\"vehicleOta\":";
     j += vehicleOtaActive ? "true" : "false";
@@ -3897,6 +3981,12 @@ static String dashDefenseConfigJson()
     // v1.20.10: dedicated Legacy 0x045 stalk-resume switch state.
     j += ",\"stalk_nag\":";
     j += dashLegacyStalkNagSwitch ? "true" : "false";
+    // v1.20.11: Legacy 0x045 bit27 clone DND switch state (dual-CAN beta17
+    // parity: both the short and the descriptive key name are accepted).
+    j += ",\"clone27_dnd\":";
+    j += dashClone27Dnd ? "true" : "false";
+    j += ",\"legacy_045_bit27_clone\":";
+    j += dashClone27Dnd ? "true" : "false";
     // Bionic disabled warning (3 consecutive failures)
     bool bionicDisabled = dashHandler ? dashHandler->bionicDisabled() : dashBionicDisabled;
     j += ",\"bionic_disabled\":";
@@ -3932,6 +4022,8 @@ static void handleDefenseConfig()
         server.hasArg("abort_guard") ||
         server.hasArg("jitter") ||
         server.hasArg("stalk_nag") ||
+        server.hasArg("clone27_dnd") ||
+        server.hasArg("legacy_045_bit27_clone") ||
         server.hasArg("hw3_slew"))
     {
         const bool hasNagModeArg = server.hasArg("nag_mode") || server.hasArg("nagMode");
@@ -3992,6 +4084,16 @@ static void handleDefenseConfig()
         // (and yields the 0x370 late echo) only while this is on.
         if (server.hasArg("stalk_nag"))
             dashLegacyStalkNagSwitch = dashArgTruthy(server.arg("stalk_nag"));
+        // v1.20.11: Legacy 0x045 bit27 clone DND switch. Rising edge gets a
+        // clean runtime slate (dual-CAN beta17 parity); the tick re-applies
+        // configure() every pass, so no further routing is needed here.
+        bool prevClone27Dnd = dashClone27Dnd;
+        if (server.hasArg("clone27_dnd"))
+            dashClone27Dnd = dashArgTruthy(server.arg("clone27_dnd"));
+        else if (server.hasArg("legacy_045_bit27_clone"))
+            dashClone27Dnd = dashArgTruthy(server.arg("legacy_045_bit27_clone"));
+        if (dashClone27Dnd && !prevClone27Dnd)
+            dashLegacy045Clone27Ctrl.resetRuntime();
         if (server.hasArg("sound_warning_suppression"))
         {
             bool v = dashArgTruthy(server.arg("sound_warning_suppression"));
@@ -6613,6 +6715,7 @@ static void handleSettingsExport()
     bool storedAbortGuard = dashAbortGuardEnabled;
     bool storedJitter = dashJitterEnabled;
     bool storedStalkNag = dashLegacyStalkNagSwitch;
+    bool storedClone27Dnd = dashClone27Dnd;
     bool storedLightingEnabled = dashLightingEnabled;
     uint8_t storedLightingCount = dashLightingCount;
     uint8_t storedLightingFrequency = dashLightingFrequency;
@@ -6702,6 +6805,7 @@ static void handleSettingsExport()
         storedSpeedNoDisturb = p.getBool("def_nd", dashSpeedNoDisturb);
         storedDndVolume = p.getBool("def_dv", dashDndVolume);
         storedDndSpeed = p.getBool("def_ds", dashDndSpeed);
+        storedClone27Dnd = p.getBool("def_c27", dashClone27Dnd);
         storedApEapCompatible = p.getBool("def_apeap", dashApEapCompatible);
         storedAutoShutdown = p.getBool(NVS_KEY_AUTO_SHUTDOWN, autoShutdownEnabled);
         storedWifiAutoOff = p.getBool(NVS_KEY_WIFI_AUTO_OFF, wifiAutoOffEnabled);
@@ -6852,6 +6956,7 @@ static void handleSettingsExport()
     j += ",\"abortGuard\":" + String(storedAbortGuard ? "true" : "false");
     j += ",\"jitter\":" + String(storedJitter ? "true" : "false");
     j += ",\"stalkNag\":" + String(storedStalkNag ? "true" : "false");
+    j += ",\"clone27Dnd\":" + String(storedClone27Dnd ? "true" : "false");
     j += ",\"speedNoDisturb\":" + String(storedSpeedNoDisturb ? "true" : "false");
     j += ",\"dndVolume\":" + String(storedDndVolume ? "true" : "false");
     j += ",\"dndSpeed\":" + String(storedDndSpeed ? "true" : "false");
@@ -7178,6 +7283,8 @@ static void handleSettingsImport()
             p.putBool("jtr_on", defense["jitter"].as<bool>());
         if (defense["stalkNag"].is<bool>())
             p.putBool("stalk_nag", defense["stalkNag"].as<bool>());
+        if (defense["clone27Dnd"].is<bool>())
+            p.putBool("def_c27", defense["clone27Dnd"].as<bool>());
         if (defense["speedNoDisturb"].is<bool>())
             p.putBool("def_nd", defense["speedNoDisturb"].as<bool>());
         if (defense["dndVolume"].is<bool>())
