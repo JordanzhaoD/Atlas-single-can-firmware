@@ -1328,6 +1328,16 @@ textarea.inp { resize: vertical; min-height: 60px; font-family: monospace;
       <div class="tgl-track"></div>
     </label>
   </div>
+  <!-- v2.10: 状态克隆免打扰上移至 NAG 免打扰区上方（Jordan 实车反馈 v2.0.0
+       开关淹没在 NAG 区中段不可见）——先于全部 NAG 家族开关展示。 -->
+  <div class="setting-row">
+    <div>
+      <div class="setting-name">Legacy 状态克隆免打扰 <span class="exp-badge">参考固件参数</span></div>
+      <div class="setting-desc">0x045 bit27 (StW_Cond_Flt) 状态克隆：handsOn 窗【2,5】+ AP 激活门 + 1.5s 间隔，预防提醒产生而非事后清除；到状态 6 自动停手，永不对抗红色方向盘接管。</div>
+    </div>
+    <label class="tgl"><input type="checkbox" id="def-clone27-tgl" onchange="saveDefenseConfig()"><div class="tgl-track"></div></label>
+  </div>
+  <div class="hint warn">Legacy 状态克隆免打扰（双CAN beta17 同款引擎）：克隆最新原生 0x045 并置位 bit27 声明方向盘状态，nag 从源头不产生，无交互累积、无 strike-out；物理滚轮活动期间永不克隆；连续 2 次 TX 失败自动解除，重新打开开关恢复。诊断见 /status clone27Diag。</div>
   <div class="setting-row">
     <div>
       <div class="setting-name">内置 NAG 抑制 <span class="exp-badge">Party CAN</span></div>
@@ -1354,14 +1364,6 @@ textarea.inp { resize: vertical; min-height: 60px; font-family: monospace;
     <label class="tgl"><input type="checkbox" id="def-stalk-nag-tgl" onchange="saveDefenseConfig()"><div class="tgl-track"></div></label>
   </div>
   <div class="hint warn">Legacy 0x045 拨杆 NAG：检测到 AP 6→1 且 Hands=3 后，从有效原车 0x045 空挡模板发送一次 Resume，下一帧发送一次空挡释放；同一提醒不会重复触发；OTA / abort 期间丢弃不重试。模式选择（上方）与 HW3：A/B/C 保持上游模式。HW4：关闭。</div>
-  <div class="setting-row">
-    <div>
-      <div class="setting-name">Legacy 状态克隆免打扰 <span class="exp-badge">参考固件参数</span></div>
-      <div class="setting-desc">0x045 bit27 (StW_Cond_Flt) 状态克隆：handsOn 窗【2,5】+ AP 激活门 + 1.5s 间隔，预防提醒产生而非事后清除；到状态 6 自动停手，永不对抗红色方向盘接管。</div>
-    </div>
-    <label class="tgl"><input type="checkbox" id="def-clone27-tgl" onchange="saveDefenseConfig()"><div class="tgl-track"></div></label>
-  </div>
-  <div class="hint warn">Legacy 状态克隆免打扰（双CAN beta17 同款引擎）：克隆最新原生 0x045 并置位 bit27 声明方向盘状态，nag 从源头不产生，无交互累积、无 strike-out；物理滚轮活动期间永不克隆；连续 2 次 TX 失败自动解除，重新打开开关恢复。诊断见 /status clone27Diag。</div>
   <div class="diag-grid" style="margin-top:10px">
     <div class="diag-item"><span class="lbl">NAG 路由</span><span class="v-warn" id="nag-route">--</span></div>
     <div class="diag-item"><span class="lbl">0x370 RX / Routed</span><span class="v-info" id="nag-rx-route">0 / 0</span></div>

@@ -2508,12 +2508,14 @@ static void appendClone27DiagJson(String &j, unsigned long now)
     j += d.cooldownRemainingMs;
     j += R"JSON(,"protocol":"legacy_0x045_bit27_clone")JSON";
     j += R"JSON(,"params":"win[2,5] das>3 1500ms")JSON";
+    // v2.10: the two explicit close-quote lines are gone (the dual-CAN beta18
+    // hotfix form) — the NEXT raw literal's leading quote closes each value.
+    // The beta17 form emitted a stray quote after every value and broke the
+    // whole /status payload ("three phantom symptoms" field lesson).
     j += R"JSON(,"sequenceState":")JSON";
     j += dashLegacy045Clone27StateName(d.state);
-    j += "\"";
-    j += R"JSON(,"blockedReason":")JSON";
+    j += R"JSON(","blockedReason":")JSON";
     j += dashLegacy045Clone27BlockName(d.blocked);
-    j += "\"";
     j += R"JSON(","tx":)JSON";
     appendTxEvidenceJson(j, d.tx, now);
     j += "}";

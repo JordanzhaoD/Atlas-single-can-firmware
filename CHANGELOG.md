@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [2.10] - 2026-11-19
+
+Field hotfix after the first v2.0.0 in-vehicle upgrade: the defense page
+looked broken and the status panels were empty. Two real defects shipped
+in v2.0.0 and one placement change, all fixed here.
+
+### Fixed
+
+- `/status` payload was invalid JSON: `appendClone27DiagJson` (ported
+  verbatim from the dual-CAN beta17) emitted a stray close-quote before
+  `,"tx":`, breaking the ENTIRE status object — every UI data panel went
+  blank (the same "one quote, three phantom symptoms" defect the dual-CAN
+  side hot-fixed in its beta18). Fixed with the beta18 emission form; a
+  new CI gate (`test_status_json_validity.py`) now emulates every status
+  appender's string assembly and `json.loads`es the result, so a literal
+  punctuation bug fails CI instead of a field session.
+- The clone27 switch sat mid-way down the NAG block and was effectively
+  undiscoverable on the phone UI. It now renders ABOVE the whole NAG DND
+  area (directly under the slew-rate row), and the decompressed deployed
+  blob is contract-pinned to contain the toggle in that position.
+
+### Changed
+
+- Defense-page layout: the "Legacy status-clone DND" switch and its
+  explainer strip moved up, ahead of the built-in NAG suppression and the
+  0x045 stalk NAG switches.
+
 ## [2.0.0] - 2026-11-19
 
 Major release: the Legacy hands-on nag defense moves from action spoofing
